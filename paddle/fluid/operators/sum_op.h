@@ -142,18 +142,24 @@ class SumKernel : public framework::OpKernel<T> {
           *context.template device_context<DeviceContext>().eigen_device();
       int start = in_place ? 1 : 0;
       if (!in_place) {
-        if ((in_num >= 2) && in_vars[0]->IsType<framework::LoDTensor>() &&
-            in_vars[1]->IsType<framework::LoDTensor>()) {
-          auto &in_0 = in_vars[0]->Get<framework::LoDTensor>();
-          auto &in_1 = in_vars[1]->Get<framework::LoDTensor>();
-          if (in_0.numel() && in_1.numel()) {
-            auto in_0_e = EigenVector<T>::Flatten(in_0);
-            auto in_1_e = EigenVector<T>::Flatten(in_1);
-            result.device(place) = in_0_e + in_1_e;
-            start = 2;
+        auto sum_ite = in_num / 2;
+        if (sum_ite >= 1) {
+          for (size_t i = 0; i < sum_ite; i++) {
+            if (in_vars[2 * i]->IsType<framework::LoDTensor>() &&
+                in_vars[2 * i + 1]->IsType<framework::LoDTensor>()) {
+              auto &in_0 = in_vars[2 * i]->Get<framework::LoDTensor>();
+              auto &in_1 = in_vars[2 * i + 1]->Get<framework::LoDTensor>();
+              if (in_0.numel() && in_1.numel()) {
+                auto in_0_e = EigenVector<T>::Flatten(in_0);
+                auto in_1_e = EigenVector<T>::Flatten(in_1);
+                i == 0 ? result.device(place) = in_0_e + in_1_e
+                       : result.device(place) = result + in_0_e + in_1_e;
+                start = start + 2;
+              }
+            }
           }
         }
-        if (start != 2) {
+        if (start != 2 * sum_ite) {
           math::SetConstant<DeviceContext, T> constant_functor;
           constant_functor(context.template device_context<DeviceContext>(),
                            out, static_cast<T>(0));
