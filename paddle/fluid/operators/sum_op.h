@@ -140,9 +140,9 @@ class SumKernel : public framework::OpKernel<T> {
       auto result = EigenVector<T>::Flatten(*out);
       auto &place =
           *context.template device_context<DeviceContext>().eigen_device();
-      int start = in_place ? 1 : 0;
+      size_t start = in_place ? 1 : 0;
       if (!in_place) {
-        auto sum_ite = in_num / 2;
+        size_t sum_ite = in_num / 2;
         if (sum_ite >= 1) {
           for (size_t i = 0; i < sum_ite; i++) {
             if (in_vars[2 * i]->IsType<framework::LoDTensor>() &&
