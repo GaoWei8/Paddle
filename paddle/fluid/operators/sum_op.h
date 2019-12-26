@@ -16,6 +16,7 @@ limitations under the License. */
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/operators/math/math_function.h"
 #include "paddle/fluid/operators/math/selected_rows_functor.h"
+#include "paddle/fluid/platform/profiler.h"
 
 namespace paddle {
 namespace operators {
@@ -130,10 +131,13 @@ class SumKernel : public framework::OpKernel<T> {
     if (out_var->IsType<framework::LoDTensor>()) {
       auto *out = out_var->GetMutable<framework::LoDTensor>();
       auto *out_ptr = out->mutable_data<T>(context.GetPlace());
-      if (in_num >= 1 && in_vars[0]->IsType<framework::LoDTensor>()) {
-        auto &in_0_tensor = in_vars[0]->Get<framework::LoDTensor>();
-        if (in_0_tensor.numel() > 0) {
-          in_place = (in_0_tensor.data<T>() == out_ptr);
+      {
+        platform::RecordEvent record_event("one equal out");
+        if (in_num >= 1 && in_vars[0]->IsType<framework::LoDTensor>()) {
+          auto &in_0_tensor = in_vars[0]->Get<framework::LoDTensor>();
+          if (in_0_tensor.numel() > 0) {
+            in_place = (in_0_tensor.data<T>() == out_ptr);
+          }
         }
       }
 
@@ -144,17 +148,22 @@ class SumKernel : public framework::OpKernel<T> {
       if (!in_place) {
         size_t sum_ite = in_num / 2;
         if (sum_ite >= 1) {
+          platform::RecordEvent record_event("two add");
           for (size_t i = 0; i < sum_ite; i++) {
             if (in_vars[2 * i]->IsType<framework::LoDTensor>() &&
                 in_vars[2 * i + 1]->IsType<framework::LoDTensor>()) {
               auto &in_0 = in_vars[2 * i]->Get<framework::LoDTensor>();
               auto &in_1 = in_vars[2 * i + 1]->Get<framework::LoDTensor>();
               if (in_0.numel() && in_1.numel()) {
+                platform::RecordEvent record_event("add kernal");
                 auto in_0_e = EigenVector<T>::Flatten(in_0);
                 auto in_1_e = EigenVector<T>::Flatten(in_1);
-                i == 0 ? result.device(place) = in_0_e + in_1_e
-                       : result.device(place) = result + in_0_e + in_1_e;
-                start = start + 2;
+                {
+                  platform::RecordEvent record_event("add kernal 2");
+                  i == 0 ? result.device(place) = in_0_e + in_1_e
+                         : result.device(place) = result + in_0_e + in_1_e;
+                  start = start + 2;
+                }
               }
             }
           }
@@ -169,6 +178,7 @@ class SumKernel : public framework::OpKernel<T> {
       math::SelectedRowsAddToTensor<DeviceContext, T> functor;
       // If in_place, just skip the first tensor
       for (size_t i = start; i < in_num; i++) {
+        platform::RecordEvent record_event("last one add");
         if (in_vars[i]->IsType<framework::LoDTensor>()) {
           auto &in_t = in_vars[i]->Get<framework::LoDTensor>();
           if (in_t.numel() == 0) {
