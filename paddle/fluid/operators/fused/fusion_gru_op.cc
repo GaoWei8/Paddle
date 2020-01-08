@@ -215,15 +215,38 @@ class FusionGRUKernel : public framework::OpKernel<T> {
     INIT_BASE_DEFINES;
     INIT_OTHER_DEFINES;
     const int N = x_lod[0].size() - 1;
+
+    LOG(INFO) << "N:" << N;
+    LOG(INFO) << "D:" << D;
+    LOG(INFO) << "D2:" << D2;
+    LOG(INFO) << "D3:" << D3;
+
     const T* h0_data = h0 ? h0->data<T>() : nullptr;
     const T* wh_state_data = wh_data + D * D2;
     T* hidden_out_data = hidden_out->mutable_data<T>(place);
     auto blas = math::GetBlas<DeviceContext, T>(ctx);
 
+    std::cout << "x data: " << std::endl;
+    for (int i = 0; i < x->numel(); i++) {
+      std::cout << x_data[i] << " ";
+    }
+    std::cout << std::endl;
+    std::cout << "wh data: " << std::endl;
+    for (int i = 0; i < wh->numel(); i++) {
+      std::cout << wh_data[i] << " ";
+    }
+    std::cout << std::endl;
+
     auto& dev_ctx = ctx.template device_context<DeviceContext>();
     math::FCFunctor<DeviceContext, T> fc;
     fc(dev_ctx, total_T, D3, M, x_data, wx_data, xx_data,
        bias ? bias->data<T>() : nullptr);
+
+    std::cout << "xx data: " << std::endl;
+    for (int i = 0; i < xx->numel(); i++) {
+      std::cout << xx_data[i] << " ";
+    }
+    std::cout << std::endl;
 
     int xx_offset = D3;
     int gate_offset = D;
@@ -237,12 +260,37 @@ class FusionGRUKernel : public framework::OpKernel<T> {
     auto move_step = [&]() {
       xx_data = xx_data + xx_offset;
       hidden_out_data = hidden_out_data + gate_offset;
+      std::cout << "hidden_out_data: " << std::endl;
+      for (int i = 0; i < hidden_out->numel(); i++) {
+        std::cout << hidden_out_data[i] << " ";
+      }
+      std::cout << std::endl;
     };
+
+    std::cout << "move xx data: " << std::endl;
+    for (int i = 0; i < xx->numel(); i++) {
+      std::cout << xx_data[i] << " ";
+    }
+    std::cout << std::endl;
+
     for (int i = 0; i < N; ++i) {
       int bid = is_reverse ? N - 1 - i : i;
       int seq_len = x_lod[0][bid + 1] - x_lod[0][bid];
+
+      LOG(INFO) << "x_lod[0][bid + 1]: " << x_lod[0][bid + 1]
+                << ", x_lod[0][bid]: " << x_lod[0][bid]
+                << ", seq_len: " << seq_len;
+
       const T* prev_hidden_data = nullptr;
       int tstart = 0;
+
+      std::cout << "h0 data: "
+                << "size: " << h0->numel() << std::endl;
+      for (int i = 0; i < h0->numel(); i++) {
+        std::cout << h0_data[i] << " ";
+      }
+      std::cout << std::endl;
+
       if (h0_data) {
         prev_hidden_data = h0_data + bid * D;
       } else {
@@ -253,23 +301,68 @@ class FusionGRUKernel : public framework::OpKernel<T> {
         tstart = 1;
         move_step();
       }
+      std::cout << "hidden_out_data: "
+                << " size: " << hidden_out->numel() << std::endl;
+      for (int i = 0; i < hidden_out->numel(); i++) {
+        std::cout << hidden_out_data[i] << " ";
+      }
+      std::cout << std::endl;
+
+      std::cout << "prev_hidden_data: " << std::endl;
+      for (int i = 0; i < hidden_out->numel(); i++) {
+        std::cout << prev_hidden_data[i] << " ";
+      }
+      std::cout << std::endl;
+
       for (int step = tstart; step < seq_len; ++step) {
         // gemm prev * (Wu + Wr)
         blas.GEMM(CblasNoTrans, CblasNoTrans, 1, D2, D, static_cast<T>(1),
                   prev_hidden_data, D, wh_data, D2, static_cast<T>(1), xx_data,
                   D3);
+        std::cout << "move xx data: " << std::endl;
+        for (int i = 0; i < xx->numel(); i++) {
+          std::cout << xx_data[i] << " ";
+        }
+        std::cout << std::endl;
+        std::cout << "prev_hidden_data: " << std::endl;
+        for (int i = 0; i < hidden_out->numel(); i++) {
+          std::cout << prev_hidden_data[i] << " ";
+        }
+        std::cout << std::endl;
+        std::cout << "hidden_out_data: "
+                  << " size: " << hidden_out->numel() << std::endl;
+        for (int i = 0; i < hidden_out->numel(); i++) {
+          std::cout << hidden_out_data[i] << " ";
+        }
+        std::cout << std::endl;
         one_step.gates = xx_data;
         one_step.ht_1 = prev_hidden_data;
         one_step.ht = hidden_out_data;
         ComputeHtPart1(&one_step, &attr);
+        std::cout << "H1 hidden_out_data: " << std::endl;
+        for (int i = 0; i < hidden_out->numel(); i++) {
+          std::cout << hidden_out_data[i] << " ";
+        }
+        std::cout << std::endl;
         // gemm rt * Ws
         blas.GEMM(CblasNoTrans, CblasNoTrans, 1, D, D, static_cast<T>(1),
                   hidden_out_data, D, wh_state_data, D, static_cast<T>(1),
                   xx_data + D2, D3);
         ComputeHtPart2(&one_step, &attr);
+        std::cout << "H2 hidden_out_data: "
+                  << " size: " << hidden_out->numel() << std::endl;
+        for (int i = 0; i < hidden_out->numel(); i++) {
+          std::cout << hidden_out_data[i] << " ";
+        }
+        std::cout << std::endl;
         // save prev
         prev_hidden_data = hidden_out_data;
         move_step();
+        std::cout << "prev_hidden_data data: " << std::endl;
+        for (int i = 0; i < hidden_out->numel(); i++) {
+          std::cout << prev_hidden_data[i] << " ";
+        }
+        std::cout << std::endl;
       }
     }
   }
@@ -283,6 +376,9 @@ class FusionGRUKernel : public framework::OpKernel<T> {
       return;
     }
     INIT_OTHER_DEFINES;
+    LOG(INFO) << "D:" << D;
+    LOG(INFO) << "D2:" << D2;
+    LOG(INFO) << "D3:" << D3;
     auto* reordered_h0 = ctx.Output<Tensor>("ReorderedH0");
     auto* batched_input = ctx.Output<LoDTensor>("BatchedInput");
     auto* batched_out = ctx.Output<LoDTensor>("BatchedOut");
@@ -292,7 +388,10 @@ class FusionGRUKernel : public framework::OpKernel<T> {
     auto& dev_ctx = ctx.template device_context<DeviceContext>();
     auto blas = math::GetBlas<DeviceContext, T>(dev_ctx);
     math::LoDTensor2BatchFunctor<DeviceContext, T> to_batch;
-
+    for (int i = 0; i < x->numel(); i++) {
+      std::cout << x_data[i] << " ";
+    }
+    std::cout << std::endl;
     math::FCFunctor<DeviceContext, T> fc;
     if (M > D3) {
       fc(dev_ctx, total_T, D3, M, x_data, wx_data, xx_data,
