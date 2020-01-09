@@ -97,7 +97,8 @@ class TestFusionGRUOp(OpTest):
         #    self.attrs['use_seq'] = use_seq
         #    self.check_output(check_dygraph=False)
         self.check_output(check_dygraph=False)
-        self.attrs['use_seq'] = True
+        #self.attrs['use_seq'] = True
+        self.attrs['use_seq'] = False
 
 
 #class TestFusionGRUOpNoInitial(TestFusionGRUOp):

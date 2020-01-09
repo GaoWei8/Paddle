@@ -386,12 +386,26 @@ class FusionGRUKernel : public framework::OpKernel<T> {
     T* batched_out_data = batched_out->mutable_data<T>(place);
     hidden_out->mutable_data<T>(place);
     auto& dev_ctx = ctx.template device_context<DeviceContext>();
-    auto blas = math::GetBlas<DeviceContext, T>(dev_ctx);
-    math::LoDTensor2BatchFunctor<DeviceContext, T> to_batch;
+    std::cout << "x data: " << std::endl;
     for (int i = 0; i < x->numel(); i++) {
       std::cout << x_data[i] << " ";
     }
     std::cout << std::endl;
+
+    std::cout << "batched_input data: " << std::endl;
+    for (int i = 0; i < batched_input->numel(); i++) {
+      std::cout << batched_input_data[i] << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "wh data: " << std::endl;
+    for (int i = 0; i < wh->numel(); i++) {
+      std::cout << wh_data[i] << " ";
+    }
+    std::cout << std::endl;
+
+    auto blas = math::GetBlas<DeviceContext, T>(dev_ctx);
+    math::LoDTensor2BatchFunctor<DeviceContext, T> to_batch;
     math::FCFunctor<DeviceContext, T> fc;
     if (M > D3) {
       fc(dev_ctx, total_T, D3, M, x_data, wx_data, xx_data,
@@ -421,11 +435,19 @@ class FusionGRUKernel : public framework::OpKernel<T> {
         std::memcpy(reordered_h0_data, h0_data + seq_order[i] * D, sz);
         reordered_h0_data += D;
       }
+
+      std::cout << "prev_hidden_data: " << std::endl;
+      for (int i = 0; i < hidden_out->numel(); i++) {
+        std::cout << prev_hidden_data[i] << " ";
+      }
+      std::cout << std::endl;
+
     } else {
       // compute without h0
       T* cur_in_data = batched_input_data;
       T* cur_out_data = batched_out_data;
       // W: {W_update, W_reset; W_state}
+      LOG(INFO) << "max_bs: " << max_bs;
       for (int i = 0; i < max_bs; ++i) {
         one_step.gates = cur_in_data;
         one_step.ht = cur_out_data;
@@ -436,6 +458,11 @@ class FusionGRUKernel : public framework::OpKernel<T> {
       }
       tstart = 1;
       prev_hidden_data = batched_out_data;
+      std::cout << "prev_hidden_data: " << std::endl;
+      for (int i = 0; i < hidden_out->numel(); i++) {
+        std::cout << prev_hidden_data[i] << " ";
+      }
+      std::cout << std::endl;
     }
     // Then start from next
     const T* wh_state_data = wh_data + D * D2;
@@ -443,6 +470,7 @@ class FusionGRUKernel : public framework::OpKernel<T> {
     const int max_seq_len = batch_starts.size() - 1;
     batched_input_data = batched_input_data + tstart * max_bs * D3;
     batched_out_data = batched_out_data + tstart * max_bs * D;
+    LOG(INFO) << "max_seq_len: " << max_seq_len;
     for (int step = tstart; step < max_seq_len; ++step) {
       const int cur_bs = batch_starts[step + 1] - batch_starts[step];
       // gemm prev * (Wu + Wr)
@@ -463,6 +491,11 @@ class FusionGRUKernel : public framework::OpKernel<T> {
         cur_prev_hidden_data += D;
         cur_out_data += D;
       }
+      std::cout << "cur_prev_hidden_dat: " << std::endl;
+      for (int i = 0; i < hidden_out->numel(); i++) {
+        std::cout << cur_prev_hidden_data[i] << " ";
+      }
+      std::cout << std::endl;
 
       cur_batched_data = batched_input_data;
       cur_out_data = batched_out_data;
@@ -471,6 +504,7 @@ class FusionGRUKernel : public framework::OpKernel<T> {
                 cur_batched_data + D2, D3);
 
       cur_prev_hidden_data = prev_hidden_data;
+      LOG(INFO) << "cur_bs: " << cur_bs;
       for (int i = 0; i < cur_bs; ++i) {
         one_step.gates = cur_batched_data;
         one_step.ht_1 = cur_prev_hidden_data;
@@ -483,6 +517,11 @@ class FusionGRUKernel : public framework::OpKernel<T> {
       prev_hidden_data = batched_out_data;
       batched_out_data = cur_out_data;
       batched_input_data = cur_batched_data;
+      std::cout << "prev_hidden_data data: " << std::endl;
+      for (int i = 0; i < hidden_out->numel(); i++) {
+        std::cout << prev_hidden_data[i] << " ";
+      }
+      std::cout << std::endl;
     }
 
     math::Batch2LoDTensorFunctor<DeviceContext, T> to_seq;
