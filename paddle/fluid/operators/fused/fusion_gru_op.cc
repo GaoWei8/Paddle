@@ -365,6 +365,7 @@ class FusionGRUKernel : public framework::OpKernel<T> {
     batched_out_data = batched_out_data + tstart * max_bs * D;
     for (int step = tstart; step < max_seq_len; ++step) {
       const int cur_bs = batch_starts[step + 1] - batch_starts[step];
+      LOG(INFO) << "cur_bs: " << cur_bs;
       // gemm prev * (Wu + Wr)
       blas.GEMM(CblasNoTrans, CblasNoTrans, cur_bs, D2, D, static_cast<T>(1),
                 prev_hidden_data, D, wh_data, D2, static_cast<T>(1),
