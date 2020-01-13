@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/operators/gru_op.h"
+#include <iostream>
 #include <string>
 #include "paddle/fluid/operators/math/blas.h"
 #include "paddle/fluid/operators/math/detail/gru_cpu_kernel.h"
@@ -246,10 +247,22 @@ class GRUCPUKernel : public framework::OpKernel<T> {
 
     auto hidden_dims = hidden->dims();
 
+    const T* input_data = input->data<T>();
+    LOG(INFO) << "Batch computer";
+    std::cout << "Initial input data: " << input->numel() << std::endl;
+    for (int i = 0; i < input->numel(); i++) {
+      std::cout << input_data[i] << " ";
+    }
+    std::cout << std::endl;
     bool is_reverse = context.Attr<bool>("is_reverse");
     math::LoDTensor2BatchFunctor<DeviceContext, T> to_batch;
     auto& dev_ctx = context.template device_context<DeviceContext>();
     to_batch(dev_ctx, *input, batch_gate, true, is_reverse);
+    std::cout << "to btach input data: " << input->numel() << std::endl;
+    for (int i = 0; i < input->numel(); i++) {
+      std::cout << input_data[i] << " ";
+    }
+    std::cout << std::endl;
 
     if (bias) {
       math::RowwiseAdd<DeviceContext, T> add_bias;
@@ -276,6 +289,12 @@ class GRUCPUKernel : public framework::OpKernel<T> {
     } else {
       gru_value.prev_out_value = nullptr;
     }
+    std::cout << "H0 Intial prev_out_value : " << h0->numel() << std::endl;
+    for (int i = 0; i < h0->numel(); i++) {
+      std::cout << gru_value.prev_out_value[i] << " ";
+    }
+    std::cout << std::endl;
+
     auto batch_starts = batch_gate->lod()[0];
     size_t seq_len = batch_starts.size() - 1;
     auto active_node = math::detail::GetActivationType(
@@ -344,6 +363,7 @@ class GRUCPUKernel : public framework::OpKernel<T> {
       blas.GEMM_FREE(packed_state);
     } else {
 #endif
+      LOG(INFO) << "seq_len: " << seq_len;
       for (size_t n = 0; n < seq_len; n++) {
         int bstart = static_cast<int>(batch_starts[n]);
         int bend = static_cast<int>(batch_starts[n + 1]);
@@ -354,8 +374,31 @@ class GRUCPUKernel : public framework::OpKernel<T> {
             batch_reset_hidden_prev->Slice(bstart, bend);
         Tensor hidden_t = batch_hidden->Slice(bstart, bend);
         gru_value.output_value = hidden_t.data<T>();
+
+        std::cout << "gru_value.output_value, hidden_t : " << hidden_t.numel()
+                  << std::endl;
+        for (int i = 0; i < hidden_t.numel(); i++) {
+          std::cout << gru_value.output_value[i] << " ";
+        }
+        std::cout << std::endl;
+
         gru_value.gate_value = gate_t.data<T>();
+
+        std::cout << "gate_t gru_value.gate_value : " << gate_t.numel()
+                  << std::endl;
+        for (int i = 0; i < gate_t.numel(); i++) {
+          std::cout << gru_value.gate_value[i] << " ";
+        }
+        std::cout << std::endl;
+
         gru_value.reset_output_value = reset_hidden_prev_t.data<T>();
+
+        std::cout << "gru_value.reset_output_value = reset_hidden_prev_t  : "
+                  << reset_hidden_prev_t.numel() << std::endl;
+        for (int i = 0; i < reset_hidden_prev_t.numel(); i++) {
+          std::cout << gru_value.reset_output_value[i] << " ";
+        }
+        std::cout << std::endl;
 
         math::GRUUnitFunctor<DeviceContext, T>::compute(
             dev_ctx, gru_value, frame_size, cur_batch_size, active_node,

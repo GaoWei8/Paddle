@@ -62,6 +62,7 @@ class GRUUnitKernel : public framework::OpKernel<T> {
     auto* hidden = context.Output<Tensor>("Hidden");
     hidden->mutable_data<T>(context.GetPlace());
 
+    LOG(INFO) << "gru unit computer";
     int batch_size = input->dims()[0];
     int frame_size = hidden_prev->dims()[1];
 
