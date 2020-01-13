@@ -305,6 +305,12 @@ class FusionGRUKernel : public framework::OpKernel<T> {
          bias ? bias->data<T>() : nullptr);
     }
 
+    std::cout << "xx data: " << std::endl;
+    for (int i = 0; i < xx->numel(); i++) {
+      std::cout << xx_data[i] << " ";
+    }
+    std::cout << std::endl;
+
     auto batched_lod = batched_input->lod();
     const auto& seq_order = batched_lod[2];
     const int max_bs = seq_order.size();
@@ -338,6 +344,12 @@ class FusionGRUKernel : public framework::OpKernel<T> {
       tstart = 1;
       prev_hidden_data = batched_out_data;
     }
+    std::cout << "reordered_h0_data: " << h0->numel() << std::endl;
+    for (int i = 0; i < h0->numel(); i++) {
+      std::cout << prev_hidden_data[i] << " ";
+    }
+    std::cout << std::endl;
+
     // Then start from next
     const T* wh_state_data = wh_data + D * D2;
     const auto& batch_starts = batched_lod[0];
