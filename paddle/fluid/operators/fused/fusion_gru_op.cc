@@ -315,7 +315,7 @@ class FusionGRUKernel : public framework::OpKernel<T> {
     const auto& seq_order = batched_lod[2];
     const int max_bs = seq_order.size();
     reordered_h0->Resize({max_bs, D});
-
+    LOG(INFO) << "max_bs: " << max_bs << "D:" << D;
     int tstart = 0;
     T* prev_hidden_data = nullptr;
     if (h0) {
@@ -354,6 +354,13 @@ class FusionGRUKernel : public framework::OpKernel<T> {
     const T* wh_state_data = wh_data + D * D2;
     const auto& batch_starts = batched_lod[0];
     const int max_seq_len = batch_starts.size() - 1;
+
+    std::cout << "1 batched_input: " << batched_input->numel() << std::endl;
+    for (int i = 0; i < batched_input->numel(); i++) {
+      std::cout << batched_input_data[i] << " ";
+    }
+    std::cout << std::endl;
+
     batched_input_data = batched_input_data + tstart * max_bs * D3;
     batched_out_data = batched_out_data + tstart * max_bs * D;
     for (int step = tstart; step < max_seq_len; ++step) {
@@ -366,10 +373,39 @@ class FusionGRUKernel : public framework::OpKernel<T> {
       T* cur_batched_data = batched_input_data;
       T* cur_out_data = batched_out_data;
       T* cur_prev_hidden_data = prev_hidden_data;
+      std::cout << "after GEMM  batched_input: " << batched_input->numel()
+                << std::endl;
+      for (int i = 0; i < batched_input->numel(); i++) {
+        std::cout << batched_input_data[i] << " ";
+      }
+      std::cout << std::endl;
       for (int i = 0; i < cur_bs; ++i) {
         one_step.gates = cur_batched_data;
+
+        std::cout << "one_step.gates batched_input: " << batched_input->numel()
+                  << std::endl;
+        for (int i = 0; i < batched_input->numel(); i++) {
+          std::cout << batched_input_data[i] << " ";
+        }
+        std::cout << std::endl;
+
         one_step.ht_1 = cur_prev_hidden_data;
+        std::cout << "one_step.ht_1 prev_hidden_data: " << batched_out->numel()
+                  << std::endl;
+        for (int i = 0; i < batched_out->numel(); i++) {
+          std::cout << cur_prev_hidden_data[i] << " ";
+        }
+        std::cout << std::endl;
+
         one_step.ht = cur_out_data;
+
+        std::cout << "one_step.ht batched_out: " << batched_out->numel()
+                  << std::endl;
+        for (int i = 0; i < batched_out->numel(); i++) {
+          std::cout << cur_out_data[i] << " ";
+        }
+        std::cout << std::endl;
+
         ComputeHtPart1(&one_step, &attr);
 
         cur_batched_data += D3;

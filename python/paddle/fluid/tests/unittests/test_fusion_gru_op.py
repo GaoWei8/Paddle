@@ -62,7 +62,7 @@ class TestFusionGRUOp(OpTest):
         T = sum(self.lod[0])
         N = len(self.lod[0])
 
-        x = np.zeros((T, self.M), dtype='float32')
+        x = np.ones((T, self.M), dtype='float32')
         wx = np.zeros((self.M, 3 * self.D), dtype='float32')
         wh = np.ones((self.D, 3 * self.D), dtype='float32')
         bias = np.ones(
