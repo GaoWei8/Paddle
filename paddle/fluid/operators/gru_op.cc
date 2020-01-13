@@ -368,7 +368,7 @@ class GRUCPUKernel : public framework::OpKernel<T> {
         int bstart = static_cast<int>(batch_starts[n]);
         int bend = static_cast<int>(batch_starts[n + 1]);
         int cur_batch_size = bend - bstart;
-
+        LOG(INFO) << "cur_batch_size: " << cur_batch_size;
         Tensor gate_t = batch_gate->Slice(bstart, bend);
         Tensor reset_hidden_prev_t =
             batch_reset_hidden_prev->Slice(bstart, bend);
