@@ -10,6 +10,7 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #pragma once
+#include <iostream>
 #include <vector>
 #include "paddle/fluid/framework/eigen.h"
 #include "paddle/fluid/framework/lod_tensor_array.h"
@@ -126,6 +127,7 @@ class SumKernel : public framework::OpKernel<T> {
     auto out_var = context.OutputVar("Out");
 
     bool in_place = out_var == in_vars[0];
+    size_t item_size = 0;
 
     if (out_var->IsType<framework::LoDTensor>()) {
       auto *out = out_var->GetMutable<framework::LoDTensor>();
@@ -134,6 +136,7 @@ class SumKernel : public framework::OpKernel<T> {
         auto &in_0_tensor = in_vars[0]->Get<framework::LoDTensor>();
         if (in_0_tensor.numel() > 0) {
           in_place = (in_0_tensor.data<T>() == out_ptr);
+          item_size = in_0_tensor.numel();
         }
       }
 
@@ -154,11 +157,17 @@ class SumKernel : public framework::OpKernel<T> {
           }
         }
         if (start != 2) {
+          LOG(INFO) << "constant_functor";
           math::SetConstant<DeviceContext, T> constant_functor;
           constant_functor(context.template device_context<DeviceContext>(),
                            out, static_cast<T>(0));
         }
       }
+      std::cout << "2 input after";
+      for (size_t i = 0; i < item_size; ++i) {
+        std::cout << out_ptr[i] << " ";
+      }
+      std::cout << std::endl;
 
       math::SelectedRowsAddToTensor<DeviceContext, T> functor;
       // If in_place, just skip the first tensor
@@ -171,14 +180,23 @@ class SumKernel : public framework::OpKernel<T> {
           auto in = EigenVector<T>::Flatten(in_t);
           result.device(place) = result + in;
         } else if (in_vars[i]->IsType<framework::SelectedRows>()) {
+          std::cout << "selectrow:;" for (size_t i = 0; i < item_size; ++i) {
+            std::cout << out_ptr[i] << " ";
+          }
+          std::cout << std::endl;
           auto &in_t = in_vars[i]->Get<framework::SelectedRows>();
           functor(context.template device_context<DeviceContext>(), in_t, out);
+          for (size_t i = 0; i < item_size; ++i) {
+            std::cout << out_ptr[i] << " ";
+          }
+          std::cout << std::endl;
         } else {
           PADDLE_THROW("Variable type must be LoDTensor/SelectedRows.");
         }
       }
     } else if (out_var->IsType<framework::SelectedRows>()) {
       SelectedRowsCompute<DeviceContext, T>(context);
+      LOG(INFO) << "Out Lod";
     } else if (out_var->IsType<framework::LoDTensorArray>()) {
       LodTensorArrayCompute<DeviceContext, T>(context);
     } else {
