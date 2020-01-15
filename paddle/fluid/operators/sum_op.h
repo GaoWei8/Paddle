@@ -179,6 +179,7 @@ class SumKernel : public framework::OpKernel<T> {
       }
     } else if (out_var->IsType<framework::SelectedRows>()) {
       SelectedRowsCompute<DeviceContext, T>(context);
+      LOG(INFO) << "out lod";
     } else if (out_var->IsType<framework::LoDTensorArray>()) {
       LodTensorArrayCompute<DeviceContext, T>(context);
     } else {
