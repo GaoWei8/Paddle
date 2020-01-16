@@ -151,6 +151,11 @@ class SumKernel : public framework::OpKernel<T> {
           PADDLE_THROW("Variable type must be LoDTensor/SelectedRows.");
         }
       }
+      std::cout << "out initial: ";
+      for (size_t i = 0; i < item_size; ++i) {
+        std::cout << out_ptr[i] << " ";
+      }
+      std::cout << std::endl;
 
       if (tensor.size()) {
         for (size_t i = 0; i < item_size; ++i) {
@@ -158,9 +163,15 @@ class SumKernel : public framework::OpKernel<T> {
           for (size_t j = 0; j < tensor.size(); ++j) {
             auto in0_ptr = tensor[j];
             result_temp = result_temp + in0_ptr[i];
+            std::cout << in0_ptr[i] << " ";
           }
           out_ptr[i] = result_temp;
         }
+        std::cout << "lod out: ";
+        for (size_t i = 0; i < item_size; ++i) {
+          std::cout << out_ptr[i] << " ";
+        }
+        std::cout << std::endl;
       } else if (!tensor.size()) {
         math::SetConstant<DeviceContext, T> constant_functor;
         constant_functor(context.template device_context<DeviceContext>(), out,
@@ -171,6 +182,12 @@ class SumKernel : public framework::OpKernel<T> {
       for (size_t i = 0; i < select_row.size(); i++) {
         auto &in_t = in_vars[select_row[i]]->Get<framework::SelectedRows>();
         functor(context.template device_context<DeviceContext>(), in_t, out);
+
+        std::cout << "select row out: ";
+        for (size_t i = 0; i < item_size; ++i) {
+          std::cout << out_ptr[i] << " ";
+        }
+        std::cout << std::endl;
       }
     } else if (out_var->IsType<framework::SelectedRows>()) {
       SelectedRowsCompute<DeviceContext, T>(context);
