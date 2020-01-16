@@ -135,6 +135,7 @@ class SumKernel : public framework::OpKernel<T> {
         auto &in_0_tensor = in_vars[0]->Get<framework::LoDTensor>();
         if (in_0_tensor.numel() > 0) {
           in_place = (in_0_tensor.data<T>() == out_ptr);
+          LOG(INFO) << "in_place: " << in_place;
         }
       }
 
@@ -152,9 +153,11 @@ class SumKernel : public framework::OpKernel<T> {
             auto in_1_e = EigenVector<T>::Flatten(in_1);
             result.device(place) = in_0_e + in_1_e;
             start = 2;
+            LOG(INFO) << "start: " << start;
           }
         }
         if (start != 2) {
+          LOG(INFO) << "start: " << start;
           math::SetConstant<DeviceContext, T> constant_functor;
           constant_functor(context.template device_context<DeviceContext>(),
                            out, static_cast<T>(0));
@@ -169,9 +172,11 @@ class SumKernel : public framework::OpKernel<T> {
           if (in_t.numel() == 0) {
             continue;
           }
+          LOG(INFO) << "LoDTensor input";
           auto in = EigenVector<T>::Flatten(in_t);
           result.device(place) = result + in;
         } else if (in_vars[i]->IsType<framework::SelectedRows>()) {
+          LOG(INFO) << "input select";
           auto &in_t = in_vars[i]->Get<framework::SelectedRows>();
           functor(context.template device_context<DeviceContext>(), in_t, out);
         } else {
