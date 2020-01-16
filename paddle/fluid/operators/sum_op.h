@@ -128,6 +128,7 @@ class SumKernel : public framework::OpKernel<T> {
     bool in_place = out_var == in_vars[0];
 
     if (out_var->IsType<framework::LoDTensor>()) {
+      LOG(INFO) << "Out LOD";
       auto *out = out_var->GetMutable<framework::LoDTensor>();
       auto *out_ptr = out->mutable_data<T>(context.GetPlace());
       if (in_num >= 1 && in_vars[0]->IsType<framework::LoDTensor>()) {
