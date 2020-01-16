@@ -127,6 +127,7 @@ class SumKernel : public framework::OpKernel<T> {
 
     bool in_place = out_var == in_vars[0];
 
+    size_t item_size = 0;
     if (out_var->IsType<framework::LoDTensor>()) {
       LOG(INFO) << "Out LOD";
       auto *out = out_var->GetMutable<framework::LoDTensor>();
@@ -135,53 +136,56 @@ class SumKernel : public framework::OpKernel<T> {
         auto &in_0_tensor = in_vars[0]->Get<framework::LoDTensor>();
         if (in_0_tensor.numel() > 0) {
           in_place = (in_0_tensor.data<T>() == out_ptr);
+          item_size = in_0_tensor.numel();
           LOG(INFO) << "in_place: " << in_place;
         }
       }
-
-      auto result = EigenVector<T>::Flatten(*out);
-      auto &place =
-          *context.template device_context<DeviceContext>().eigen_device();
-      int start = in_place ? 1 : 0;
-      if (!in_place) {
-        if ((in_num >= 2) && in_vars[0]->IsType<framework::LoDTensor>() &&
-            in_vars[1]->IsType<framework::LoDTensor>()) {
-          auto &in_0 = in_vars[0]->Get<framework::LoDTensor>();
-          auto &in_1 = in_vars[1]->Get<framework::LoDTensor>();
-          if (in_0.numel() && in_1.numel()) {
-            auto in_0_e = EigenVector<T>::Flatten(in_0);
-            auto in_1_e = EigenVector<T>::Flatten(in_1);
-            result.device(place) = in_0_e + in_1_e;
-            start = 2;
-            LOG(INFO) << "start: " << start;
-          }
-        }
-        if (start != 2) {
-          LOG(INFO) << "start: " << start;
-          math::SetConstant<DeviceContext, T> constant_functor;
-          constant_functor(context.template device_context<DeviceContext>(),
-                           out, static_cast<T>(0));
-        }
-      }
-
-      math::SelectedRowsAddToTensor<DeviceContext, T> functor;
-      // If in_place, just skip the first tensor
-      for (size_t i = start; i < in_num; i++) {
+      std::vector<T *> tensor;
+      std::vector<size_t> select_row;
+      tensor.clear();
+      select_row.clear();
+      math::SetConstant<DeviceContext, T> constant_functor;
+      constant_functor(context.template device_context<DeviceContext>(), out,
+                       static_cast<T>(0));
+      for (size_t i = 0; i < in_num; i++) {
         if (in_vars[i]->IsType<framework::LoDTensor>()) {
-          auto &in_t = in_vars[i]->Get<framework::LoDTensor>();
-          if (in_t.numel() == 0) {
-            continue;
+          auto in_tensor = in_vars[i]->Get<framework::LoDTensor>();
+          if (in_tensor.numel()) {
+            auto in_data = in_tensor.data<T>();
+            tensor.push_back(in_data);
           }
-          LOG(INFO) << "LoDTensor input";
-          auto in = EigenVector<T>::Flatten(in_t);
-          result.device(place) = result + in;
         } else if (in_vars[i]->IsType<framework::SelectedRows>()) {
-          LOG(INFO) << "input select";
-          auto &in_t = in_vars[i]->Get<framework::SelectedRows>();
-          functor(context.template device_context<DeviceContext>(), in_t, out);
+          select_row.push_back(i);
         } else {
           PADDLE_THROW("Variable type must be LoDTensor/SelectedRows.");
         }
+      }
+      std::cout << "out: ";
+      for (size_t i = 0; i < item_size; ++i) {
+        std::cout << out_ptr[i] << " ";
+      }
+      std::cout << std::endl;
+      if (tensor.size()) {
+        for (size_t i = 0; i < item_size; ++i) {
+          T result_temp = 0;
+          for (size_t j = 0; j < tensor.size(); ++j) {
+            auto in0_ptr = tensor[j];
+            std::cout << in0_ptr[i] << " ";
+            result_temp = result_temp + in0_ptr[i];
+          }
+          out_ptr[i] = out_ptr[i] + result_temp;
+        }
+        LOG(INFO) << "LOD out";
+        for (size_t i = 0; i < item_size; ++i) {
+          std::cout << out_ptr[i] << " ";
+        }
+        std::cout << std::endl;
+      }
+      math::SelectedRowsAddToTensor<DeviceContext, T> functor;
+      for (size_t i = 0; i < select_row.size(); i++) {
+        LOG(INFO) << "select row input";
+        auto &in_t = in_vars[select_row[i]]->Get<framework::SelectedRows>();
+        functor(context.template device_context<DeviceContext>(), in_t, out);
       }
     } else if (out_var->IsType<framework::SelectedRows>()) {
       SelectedRowsCompute<DeviceContext, T>(context);

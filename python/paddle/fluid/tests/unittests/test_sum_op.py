@@ -136,7 +136,7 @@ class TestSelectedRowsSumOp(unittest.TestCase):
         if core.is_compiled_with_cuda():
             places.append(core.CUDAPlace(0))
         for place in places:
-            for inplace in [False]:
+            for inplace in [True, False]:
                 self.check_with_place(place, inplace)
 
 
@@ -168,6 +168,7 @@ class TestLoDTensorAndSelectedRowsOp(TestSelectedRowsSumOp):
         for ele in self.rows:
             result[ele] += 1
 
+        print(out)
         out_t = np.array(out)
         self.assertEqual(out_t.shape[0], self.height)
         self.assertTrue(
