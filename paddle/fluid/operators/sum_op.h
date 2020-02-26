@@ -10,6 +10,7 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #pragma once
+#include <iostream>
 #include <vector>
 #include "paddle/fluid/framework/eigen.h"
 #include "paddle/fluid/framework/lod_tensor_array.h"
@@ -146,8 +147,25 @@ class SumKernel : public framework::OpKernel<T> {
           PADDLE_THROW("Variable type must be LoDTensor/SelectedRows.");
         }
       }
+
       if (tensor.size()) {
-        for (size_t i = 0; i < item_size; ++i) {
+        size_t loop_num = item_size / 4 * 4;
+        for (size_t i = 0; i < loop_num; i += 4) {
+          T result_temp[4];
+          for (size_t k = 0; k < 4; ++k) {
+            result_temp[k] = tensor[0][i + k];
+          }
+          for (size_t j = 1; j < tensor.size(); ++j) {
+            auto in0_ptr = tensor[j];
+            for (size_t k = 0; k < 4; ++k) {
+              result_temp[k] = result_temp[k] + in0_ptr[i + k];
+            }
+          }
+          for (size_t k = 0; k < 4; ++k) {
+            out_ptr[i + k] = result_temp[k];
+          }
+        }
+        for (size_t i = loop_num; i < item_size; ++i) {
           T result_temp = tensor[0][i];
           for (size_t j = 1; j < tensor.size(); ++j) {
             auto in0_ptr = tensor[j];
