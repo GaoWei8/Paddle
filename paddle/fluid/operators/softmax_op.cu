@@ -20,8 +20,8 @@
 #include "paddle/fluid/platform/cuda_primitives.h"
 #include "paddle/fluid/platform/gpu_launch_param_config.h"
 // #include "paddle/fluid/platform/float16.h"
-// #include "stdio.h"
 #include "paddle/fluid/operators/math/blas.h"
+// #include "stdio.h"
 
 namespace platform = paddle::platform;
 namespace ops = paddle::operators;
@@ -55,6 +55,19 @@ __global__ void SumCUDAKernel(const int n, const int d, const int in,
         //  in + jdy, exp_x[idx * d + k * in + jdy]);
       }
     }
+  }
+}
+
+template <typename T>
+__global__ void SumOutCUDAKernel(const int n, const int d,
+                                 const T* __restrict__ exp_x,
+                                 T* __restrict__ sum) {
+  int rowIdx = threadIdx.x + blockIdx.x * blockDim.x;
+
+  if (rowIdx < n) {
+    T s = 0;
+    for (int k = 0; k < d; k++) s += exp_x[rowIdx * d + k];
+    sum[rowIdx] = s;
   }
 }
 
@@ -137,8 +150,11 @@ class SoftmaxKernel<platform::CUDADeviceContext, T>
     auto* x_data = X->data<T>();
 
     framework::Tensor exp_x;
+    framework::Tensor exp_x_b;
     exp_x.Resize({numel});
+    exp_x_b.Resize({numel});
     auto* exp_x_data = exp_x.mutable_data<T>(context.GetPlace());
+    auto* exp_x_b_data = exp_x_b.mutable_data<T>(context.GetPlace());
 
     auto stream = context.cuda_device_context().stream();
     auto& dev_ctx =
@@ -147,22 +163,30 @@ class SoftmaxKernel<platform::CUDADeviceContext, T>
     ExpCUDAKernel<
         T><<<config.block_per_grid.x, config.thread_per_block.x, 0, stream>>>(
         numel, x_data, exp_x_data);
+    ExpCUDAKernel<
+        T><<<config.block_per_grid.x, config.thread_per_block.x, 0, stream>>>(
+        numel, x_data, exp_x_b_data);
 
     framework::Tensor sum_x;
     sum_x.Resize({n * in});
     auto* sum_x_data = sum_x.mutable_data<T>(context.GetPlace());
 
     if (axis == rank - 1) {
-      auto& dev_ctx =
-          context.template device_context<platform::CUDADeviceContext>();
-
-      framework::Tensor one;
-      one.mutable_data<T>({d}, context.GetPlace());
+      //      auto& dev_ctx =
+      //          context.template
+      //          device_context<platform::CUDADeviceContext>();
+      //
+      //      framework::Tensor one;
+      //      one.mutable_data<T>({d}, context.GetPlace());
       math::SetConstant<platform::CUDADeviceContext, T> set;
-      set(dev_ctx, &one, static_cast<T>(1.0));
-
-      math::GetBlas<platform::CUDADeviceContext, T>(dev_ctx).GEMV(
-          false, n, d, 1.0, exp_x_data, one.data<T>(), 0.0, sum_x_data);
+      set(dev_ctx, &sum_x, static_cast<T>(0.0));
+      //
+      //      math::GetBlas<platform::CUDADeviceContext, T>(dev_ctx).GEMV(
+      //          false, n, d, 1.0, exp_x_data, one.data<T>(), 0.0, sum_x_data);
+      dim3 block2(64);
+      dim3 grid2((n + block2.x - 1) / block2.x);
+      SumOutCUDAKernel<T><<<grid2, block2, 0, stream>>>(n, d, exp_x_b_data,
+                                                        sum_x_data);
 
     } else {
       dim3 block(std::min(512, in));
