@@ -216,6 +216,8 @@ struct SearchAlgorithm<cudnnConvolutionFwdAlgoPerf_t> {
               &perf_count, perf_results.get()));
       algo = (perf_results.get())[best_algo_idx].algo;
       workspace_size = GetWorkspaceSize(args, algo);
+      LOG(INFO) << "cudnnGetConvolutionForwardAlgorithm_v7 choose algo: "
+                << algo;
 
       if (workspace_size > workspace_size_limit) {
 #if CUDNN_VERSION >= 8000
@@ -231,6 +233,8 @@ struct SearchAlgorithm<cudnnConvolutionFwdAlgoPerf_t> {
                 args.cdesc.desc(), args.odesc.desc(),
                 CUDNN_CONVOLUTION_FWD_SPECIFY_WORKSPACE_LIMIT,
                 workspace_size_limit, &algo));
+        LOG(INFO) << "cudnnGetConvolutionForwardAlgorithm 1 choose algo: "
+                  << algo;
 #endif
       }
 #else
@@ -240,6 +244,8 @@ struct SearchAlgorithm<cudnnConvolutionFwdAlgoPerf_t> {
               args.cdesc.desc(), args.odesc.desc(),
               CUDNN_CONVOLUTION_FWD_SPECIFY_WORKSPACE_LIMIT,
               workspace_size_limit, &algo));
+      LOG(INFO) << "cudnnGetConvolutionForwardAlgorithm 2 choose algo: "
+                << algo;
 #endif
       VLOG(3) << "choose algo " << algo;
     } else if (deterministic) {
@@ -259,7 +265,6 @@ struct SearchAlgorithm<cudnnConvolutionFwdAlgoPerf_t> {
       VLOG(10) << "cudnnConvolutionFwdAlgoPerf_t:"
                << ", x_dims:" << x_dims << ", w_dims:" << w_dims << ", args.s"
                << args.s << ", args.p" << args.p << ", args.d" << args.d;
-
       algo = algo_cache.GetAlgorithm(
           x_dims, w_dims, args.s, args.p, args.d, 0,
           static_cast<int64_t>(args.cudnn_dtype), [&]() {
@@ -287,6 +292,7 @@ struct SearchAlgorithm<cudnnConvolutionFwdAlgoPerf_t> {
             return perf_stat[0].algo;
           });
     }
+    LOG(INFO) << "cudnnFindConvolutionForwardAlgorithmEx choose algo: " << algo;
     VLOG(3) << "choose algo " << algo;
     return algo;
   }
