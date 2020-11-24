@@ -157,9 +157,11 @@ void ChooseAlgo(const std::vector<PerfType>& perf_results,
       if (result.mathType == CUDNN_TENSOR_OP_MATH) {
         math_type_str = "1";
       }
-      VLOG(3) << "    choose algo: " << result.algo << ", TC: " << math_type_str
-              << ", time: " << result.time << " ms"
-              << ", wksp = " << result.memory << ", status = " << result.status;
+      LOG(INFO) << "    choose algo: " << result.algo
+                << ", TC: " << math_type_str << ", time: " << result.time
+                << " ms"
+                << ", wksp = " << result.memory
+                << ", status = " << result.status;
       return;
     }
   }
@@ -236,12 +238,14 @@ struct SearchAlgorithm<cudnnConvolutionFwdAlgoPerf_t> {
       algo = (perf_results.get())[best_algo_idx].algo;
       workspace_size = GetWorkspaceSize(args, algo);
 
+      LOG(INFO) << "cudnnGetConvolutionForwardAlgorithm_v7 forward:";
       if (workspace_size > workspace_size_limit) {
 #if CUDNN_VERSION >= 8000
         // cudnnGetConvolutionForwardAlgorithm is removed in CUDNN-8
         ChooseAlgoByWorkspace<perf_t, algo_t>(perf_results.get(),
                                               kNUM_CUDNN_FWD_ALGS,
                                               workspace_size_limit, &algo);
+        LOG(INFO) << "choose algo result:" << algo;
 #else
         VLOG(1) << "Fallback to non-v7 method to find conv algorithm becasue "
                    "the workspace size request("
