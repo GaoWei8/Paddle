@@ -110,13 +110,15 @@ void ChooseAlgoByWorkspace(PerfType* perf_results, size_t perf_num,
     if (result.status == CUDNN_STATUS_SUCCESS &&
         result.memory < workspace_byte) {
       *algo = result.algo;
-      VLOG(3) << "    algo: " << result.algo << ", time: " << result.time
+      VLOG(3)<<"ChooseAlgoByWorkspace algo: "<<result.algo 
+	      << ", time: " << result.time
               << " ms, wksp = " << result.memory
               << ", status = " << result.status;
       return;
     }
   }
-  VLOG(3) << "Can not find alog that requires memory < "
+  VLOG(3)<<"ChooseAlgoByWorkspace: " 
+	  << "Can not find alog that requires memory < "
           << static_cast<double>(workspace_byte) / (1 << 20) << " MB";
 }
 
@@ -245,7 +247,8 @@ struct SearchAlgorithm<cudnnConvolutionFwdAlgoPerf_t> {
         ChooseAlgoByWorkspace<perf_t, algo_t>(perf_results.get(),
                                               kNUM_CUDNN_FWD_ALGS,
                                               workspace_size_limit, &algo);
-        LOG(INFO) << "choose algo result:" << algo;
+        LOG(INFO) << "CUDNN>=8000 choose algo result:" << algo<<
+		" workspace_size:" <<workspace_size <<" workspace_size_limit: "<< workspace_size_limit;
 #else
         VLOG(1) << "Fallback to non-v7 method to find conv algorithm becasue "
                    "the workspace size request("
@@ -260,17 +263,21 @@ struct SearchAlgorithm<cudnnConvolutionFwdAlgoPerf_t> {
 #endif
       }
 #else
+      LOG(INFO) << "CUDNN_VERSION < 7001 cudnnGetConvolutionForwardAlgorithm forward:";
       PADDLE_ENFORCE_CUDA_SUCCESS(
           platform::dynload::cudnnGetConvolutionForwardAlgorithm(
               args.handle, args.idesc.desc(), args.wdesc.desc(),
               args.cdesc.desc(), args.odesc.desc(),
               CUDNN_CONVOLUTION_FWD_SPECIFY_WORKSPACE_LIMIT,
               workspace_size_limit, &algo));
+      LOG(INFO) << "CUDNN_VERSION < 7001 cudnnGetConvolutionForwardAlgorithm result:" 
+	      << algo <<" workspace_size_limit: "<< workspace_size_limit;
 #endif
-      VLOG(3) << "choose algo " << algo;
+      VLOG(3) << "!exhaustive && !deterministic at end choose algo: " << algo;
     } else if (deterministic) {
       algo = static_cast<cudnnConvolutionFwdAlgo_t>(1);
     } else {
+      VLOG(3) << "exhaustive forward: ";
       auto& dev_ctx =
           ctx.template device_context<platform::CUDADeviceContext>();
       auto workspace_handle = dev_ctx.cudnn_workspace_handle();
@@ -282,7 +289,7 @@ struct SearchAlgorithm<cudnnConvolutionFwdAlgoPerf_t> {
       auto x_dims = framework::vectorize(args.x->dims());
       auto w_dims = framework::vectorize(args.w->dims());
 
-      VLOG(10) << "cudnnConvolutionFwdAlgoPerf_t:"
+      VLOG(3) <<"cudnnFindConvolutionForwardAlgorithmEx: "<< "cudnnConvolutionFwdAlgoPerf_t:"
                << ", x_dims:" << x_dims << ", w_dims:" << w_dims << ", args.s"
                << args.s << ", args.p" << args.p << ", args.d" << args.d;
 
@@ -348,12 +355,12 @@ struct SearchAlgorithm<cudnnConvolutionBwdDataAlgoPerf_t> {
       PADDLE_ENFORCE_CUDA_SUCCESS(
           platform::dynload::cudnnSetConvolutionMathType(args.cdesc.desc(),
                                                          CUDNN_TENSOR_OP_MATH));
-      VLOG(5) << "use cudnn_tensor_op_math";
+      VLOG(3)<<"BwdData " << "use cudnn_tensor_op_math";
     } else {
       PADDLE_ENFORCE_CUDA_SUCCESS(
           platform::dynload::cudnnSetConvolutionMathType(args.cdesc.desc(),
                                                          CUDNN_DEFAULT_MATH));
-      VLOG(5) << "NOT use cudnn_tensor_op_math";
+      VLOG(3)<<"BwdData " << "NOT use cudnn_tensor_op_math";
     }
 #endif
 
