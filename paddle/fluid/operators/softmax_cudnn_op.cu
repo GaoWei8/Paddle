@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/framework/op_registry.h"
+#include "paddle/fluid/operators/math/math_cuda_utils.h"
 #include "paddle/fluid/operators/softmax_op.h"
 #include "paddle/fluid/platform/cudnn_helper.h"
 
@@ -38,6 +39,17 @@ static inline int SizeOutAxis(const int axis, DDim dims) {
   return size;
 }
 
+__global__ void SoftmaxForward(float* dst, const float* src,
+                               const int batch_size, const int softmax_ele) {
+  unsigned int idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+  float val = src[idx];
+  float max_val = math::blockReduceMax<float>(val, 0xffffffff);
+  float exp = __expf(val - max_val);
+  float invsum = 1.f / (math::blockReduceSum<float>(exp, 0xffffffff) + 1e-6f);
+  dst[idx] = exp * invsum;
+}
+
 template <typename T>
 class SoftmaxCUDNNKernel : public framework::OpKernel<T> {
  public:
@@ -54,20 +66,29 @@ class SoftmaxCUDNNKernel : public framework::OpKernel<T> {
     const int N = SizeToAxis(axis, dims);
     const int D = SizeOutAxis(axis, dims);
 
-    ScopedTensorDescriptor desc;
-    std::vector<int> tensor_dims = {N, dim, D, 1};
-    DataLayout layout = DataLayout::kNCHW;
-    cudnnTensorDescriptor_t desc_ = desc.descriptor<T>(layout, tensor_dims);
+    constexpr bool warp_softmax_available = std::is_same<T, float>::value;
 
-    auto& dev_ctx = ctx.template device_context<platform::CUDADeviceContext>();
-    auto handle = dev_ctx.cudnn_handle();
-    auto mode = axis == rank - 1 ? CUDNN_SOFTMAX_MODE_INSTANCE
-                                 : CUDNN_SOFTMAX_MODE_CHANNEL;
+    if (D == 1 && dim == 128 && warp_softmax_available) {
+      SoftmaxForward<<<N, dim, 0, ctx.cuda_device_context().stream()>>>(
+          out->data<float>(), x->data<float>(), N, dim);
 
-    PADDLE_ENFORCE_CUDA_SUCCESS(platform::dynload::cudnnSoftmaxForward(
-        handle, CUDNN_SOFTMAX_ACCURATE, mode,
-        platform::CudnnDataType<T>::kOne(), desc_, x->data<T>(),
-        platform::CudnnDataType<T>::kZero(), desc_, out_data));
+    } else {
+      ScopedTensorDescriptor desc;
+      std::vector<int> tensor_dims = {N, dim, D, 1};
+      DataLayout layout = DataLayout::kNCHW;
+      cudnnTensorDescriptor_t desc_ = desc.descriptor<T>(layout, tensor_dims);
+
+      auto& dev_ctx =
+          ctx.template device_context<platform::CUDADeviceContext>();
+      auto handle = dev_ctx.cudnn_handle();
+      auto mode = axis == rank - 1 ? CUDNN_SOFTMAX_MODE_INSTANCE
+                                   : CUDNN_SOFTMAX_MODE_CHANNEL;
+
+      PADDLE_ENFORCE_CUDA_SUCCESS(platform::dynload::cudnnSoftmaxForward(
+          handle, CUDNN_SOFTMAX_ACCURATE, mode,
+          platform::CudnnDataType<T>::kOne(), desc_, x->data<T>(),
+          platform::CudnnDataType<T>::kZero(), desc_, out_data));
+    }
   }
 };
 
