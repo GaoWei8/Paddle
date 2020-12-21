@@ -57,6 +57,41 @@ union vec_t<platform::float16, 4> {
 };
 
 template <typename T>
+__global__ void SoftmaxLargeDimForward(T* dst, const T* src,
+                                       const int batch_size,
+                                       const int softmax_ele) {
+  unsigned int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  __shared__ T max_value;
+  if (threadIdx.x == 0) {
+    max_value = src[idx];
+  }
+  __syncthreads();
+
+  for (; idx < softmax_ele; idx += blockDim.x * gridDim.x) {
+    max_value = max(src[idx], max_value);
+    // printf("%d, %f, %f/n", idx,x[idx],out[idx]);
+  }
+  __syncthreads();
+
+  extern __shared__ int shared_data[1024];
+  for (; idx < softmax_ele; idx += blockDim.x * gridDim.x) {
+    shared_data[idx] = exp(src[idx] - max);
+    // printf("%d, %f, %f/n", idx,x[idx],out[idx]);
+  }
+  __syncthreads();
+
+  __shared__ T sum;
+  for (; idx < softmax_ele; idx += blockDim.x * gridDim.x) {
+    sum += shared_data[idx];
+  }
+  __syncthreads();
+
+  for (; idx < softmax_ele; idx += blockDim.x * gridDim.x) {
+    dst[idx] = exp(src[idx] - max) / sum;
+  }
+}
+
+template <typename T>
 __global__ void SoftmaxForward(T* dst, const T* src, const int batch_size,
                                const int softmax_ele) {
   unsigned int idx = threadIdx.x + blockIdx.x * blockDim.x;
