@@ -56,6 +56,17 @@ union vec_t<platform::float16, 4> {
   platform::float16 v[4];
 };
 
+template <typename T>
+__global__ void SoftmaxForward(T* dst, const T* src, const int batch_size,
+                               const int softmax_ele) {
+  unsigned int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  float val = static_cast<float>(src[idx]);
+  float max_val = math::blockReduceMax<float>(val, 0xffffffff);
+  float exp = __expf(val - max_val);
+  float invsum = 1.f / (math::blockReduceSum<float>(exp, 0xffffffff) + 1e-6f);
+  dst[idx] = exp * invsum;
+}
+
 template <typename T, typename VECT, int VPT, int WARP_PER_BLOCK>
 __global__ void VecSoftmaxForward(T* dst, const T* src, const int batch_size,
                                   const int softmax_ele) {
@@ -130,26 +141,44 @@ class SoftmaxCUDNNKernel : public framework::OpKernel<T> {
     const int N = SizeToAxis(axis, dims);
     const int D = SizeOutAxis(axis, dims);
 
+    auto& dev_ctx = ctx.template device_context<platform::CUDADeviceContext>();
+    int max_pyhsical_threads = dev_ctx.GetMaxPhysicalThreadCount();
+
     constexpr int warps_per_block = 4;
-    if (D == 1 && dim == 128 && N % warps_per_block == 0 && sizeof(T) <= 4) {
-      // a warp for a batch, 4 elements for a thread, only support the softmax
-      // dim size = 128 currently
-      if (sizeof(T) == 2) {
-        VecSoftmaxForward<
-            T, int2, 4,
-            warps_per_block><<<N / warps_per_block, warps_per_block * WARP_SIZE,
-                               0, ctx.cuda_device_context().stream()>>>(
-            out_data, x->data<T>(), N, dim);
-      } else if (sizeof(T) == 4) {
-        VecSoftmaxForward<
-            T, int4, 4,
-            warps_per_block><<<N / warps_per_block, warps_per_block * WARP_SIZE,
-                               0, ctx.cuda_device_context().stream()>>>(
-            out_data, x->data<T>(), N, dim);
-      } else {
-        assert(false && "not support");
+    bool optimize = false;
+    if (D == 1) {
+      if (dim <= max_pyhsical_threads) {
+        if (dim % 128 == 0 && N % warps_per_block == 0 && sizeof(T) <= 4) {
+          optimize = true;
+          // a warp for a batch, 4 elements for a thread, only support the
+          // softmax
+          // dim size = 128 currently
+          if (sizeof(T) == 2) {
+            VecSoftmaxForward<
+                T, int2, 4,
+                warps_per_block><<<N / warps_per_block, dim, 0,
+                                   ctx.cuda_device_context().stream()>>>(
+                out_data, x->data<T>(), N, dim);
+          } else if (sizeof(T) == 4) {
+            VecSoftmaxForward<
+                T, int4, 4,
+                warps_per_block><<<N / warps_per_block, dim, 0,
+                                   ctx.cuda_device_context().stream()>>>(
+                out_data, x->data<T>(), N, dim);
+          } else {
+            assert(false && "not support");
+          }
+        } else {
+          if (sizeof(T) <= 4) {
+            optimize = true;
+            SoftmaxForward<
+                T><<<N, dim, 0, ctx.cuda_device_context().stream()>>>(
+                out->data<T>(), x->data<T>(), N, dim);
+          }
+        }
       }
-    } else {
+    }
+    if (!optimize) {
       ScopedTensorDescriptor desc;
       std::vector<int> tensor_dims = {N, dim, D, 1};
       DataLayout layout = DataLayout::kNCHW;
