@@ -94,7 +94,7 @@ __global__ void SoftmaxForward(T* dst, const T* src, const int batch_size,
   max_data[tid] = static_cast<float>(src[i]);
   __syncthreads();
 
-  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+  for (unsigned int s = blockDim.x / 2; s > 16; s >>= 1) {
     if (tid < s) {
       max_data[tid] = max(max_data[tid], max_data[tid + s]);
     }
@@ -102,15 +102,16 @@ __global__ void SoftmaxForward(T* dst, const T* src, const int batch_size,
   }
 
   float max_value;
-  if (tid == 0) {
-    max_value = max_data[0];
+  if (tid < 32) {
+    max_value = max_data[tid];
+    max_value = math::warpReduceMax<float>(max_value, 0xffffffff);
+    // max_value = max_data[0];
   }
-  __syncthreads();
 
   sum_data[tid] = __expf(static_cast<float>(src[i]) - max_value);
   __syncthreads();
 
-  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+  for (unsigned int s = blockDim.x / 2; s > 16; s >>= 1) {
     if (tid < s) {
       sum_data[tid] += sum_data[tid + s];
     }
@@ -118,10 +119,11 @@ __global__ void SoftmaxForward(T* dst, const T* src, const int batch_size,
   }
 
   float sum_value;
-  if (tid == 0) {
-    sum_value = sum_data[0];
+  if (tid < 32) {
+    sum_value = sum_data[tid];
+    sum_value = math::warpReduceSum<float>(sum_value, 0xffffffff);
+    // sum_value = sum_data[0];
   }
-  __syncthreads();
 
   dst[i] = static_cast<T>(__expf(static_cast<float>(src[i]) - max_value) /
                           (sum_value + 1e-6f));
