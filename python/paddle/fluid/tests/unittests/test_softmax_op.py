@@ -252,6 +252,19 @@ class TestSoftmaxCUDNNOp12(TestSoftmaxCUDNNOp):
 
 @unittest.skipIf(not core.is_compiled_with_cuda(),
                  "core is not compiled with CUDA")
+class TestSoftmaxCUDNNOp13(TestSoftmaxCUDNNOp):
+    def init_kernel_type(self):
+        self.dtype = np.float32
+
+    def get_x_shape(self):
+        return [2, 3, 4, 5, 128]
+
+    def get_axis(self):
+        return 4
+
+
+@unittest.skipIf(not core.is_compiled_with_cuda(),
+                 "core is not compiled with CUDA")
 class TestSoftmaxFP16Op(TestSoftmaxOp):
     def init_kernel_type(self):
         self.dtype = np.float16
@@ -293,6 +306,16 @@ class TestSoftmaxFP16CUDNNOp(TestSoftmaxOp):
 class TestSoftmaxFP16CUDNNOp2(TestSoftmaxFP16CUDNNOp):
     def get_x_shape(self):
         return [2, 3, 4, 5]
+
+
+@unittest.skipIf(not core.is_compiled_with_cuda(),
+                 "core is not compiled with CUDA")
+class TestSoftmaxFP16CUDNNOp3(TestSoftmaxFP16CUDNNOp):
+    def get_x_shape(self):
+        return [2, 3, 4, 128]
+
+    def get_axis(self):
+        return 3
 
 
 class TestSoftmaxAPI(unittest.TestCase):

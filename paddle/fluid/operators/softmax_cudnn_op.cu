@@ -84,6 +84,49 @@ __global__ void VecSoftmaxForward(T* dst, const T* src, const int batch_size,
   reinterpret_cast<VECT*>(&dst[offset + idx])[0] = buf;
 }
 
+template <typename T, int VPT>
+__global__ void SoftmaxForward(T* dst, const T* src, const int batch_size,
+                               const int softmax_ele) {
+  extern __shared__ float max_data[];
+  extern __shared__ float sum_data[];
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  int tid = threadIdx.x;
+  max_data[tid] = static_cast<float>(src[i]);
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (tid < s) {
+      max_data[tid] = max(max_data[tid], max_data[tid + s]);
+    }
+    __syncthreads();
+  }
+
+  float max_value;
+  if (tid == 0) {
+    max_value = max_data[0];
+  }
+  __syncthreads();
+
+  sum_data[tid] = __expf(static_cast<float>(src[i]) - max_value);
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (tid < s) {
+      sum_data[tid] += sum_data[tid + s];
+    }
+    __syncthreads();
+  }
+
+  float sum_value;
+  if (tid == 0) {
+    sum_value = sum_data[0];
+  }
+  __syncthreads();
+
+  dst[i] = static_cast<T>(__expf(static_cast<float>(src[i]) - max_value) /
+                          (sum_value + 1e-6f));
+}
+
 template <typename T, int VPT, int WARP_PER_BLOCK>
 __global__ void VecSoftmaxBackward(T* dst, const T* grad, const T* src,
                                    const int batch_size,
@@ -141,14 +184,19 @@ class SoftmaxCUDNNKernel : public framework::OpKernel<T> {
                                0, ctx.cuda_device_context().stream()>>>(
             out_data, x->data<T>(), N, dim);
       } else if (sizeof(T) == 4) {
-        VecSoftmaxForward<
-            T, int4, 4,
-            warps_per_block><<<N / warps_per_block, warps_per_block * WARP_SIZE,
-                               0, ctx.cuda_device_context().stream()>>>(
+        //  VecSoftmaxForward<
+        //      T, int4, 4,
+        //      warps_per_block><<<N / warps_per_block, warps_per_block *
+        //      WARP_SIZE,
+        //                         0, ctx.cuda_device_context().stream()>>>(
+        //      out_data, x->data<T>(), N, dim);
+        SoftmaxForward<T, 4><<<N, 128, 128 * sizeof(float),
+                               ctx.cuda_device_context().stream()>>>(
             out_data, x->data<T>(), N, dim);
       } else {
         assert(false && "not support");
       }
+
     } else {
       ScopedTensorDescriptor desc;
       std::vector<int> tensor_dims = {N, dim, D, 1};
