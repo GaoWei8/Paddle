@@ -84,49 +84,15 @@ __global__ void VecSoftmaxForward(T* dst, const T* src, const int batch_size,
   reinterpret_cast<VECT*>(&dst[offset + idx])[0] = buf;
 }
 
-template <typename T, int VPT>
-__global__ void SoftmaxForward(T* dst, const T* src, const int batch_size,
-                               const int softmax_ele) {
-  extern __shared__ float max_data[];
-  extern __shared__ float sum_data[];
+template <typename T>
+__global__ void WarpSoftmaxForward(T* dst, const T* src) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
-  int tid = threadIdx.x;
-  //  max_data[tid] = static_cast<float>(src[i]);
-  //  __syncthreads();
-  //
-  //  for (unsigned int s = blockDim.x / 2; s > 16; s >>= 1) {
-  //    if (tid < s) {
-  //      max_data[tid] = max(max_data[tid], max_data[tid + s]);
-  //    }
-  //    __syncthreads();
-  //  }
-  //
-  //  float max_value;
-  //  if (tid < 32) {
-  //    max_value = max_data[tid];
-  //    max_value = math::warpReduceMax<float>(max_value, 0xffffffff);
-  //    // max_value = max_data[0];
-  //  }
 
-  float max_value = max_data[tid];
+  float max_value = static_cast<float>(src[i]);
   max_value = math::blockReduceMax<float>(max_value, 0xffffffff);
 
-  sum_data[tid] = __expf(static_cast<float>(src[i]) - max_value);
-  __syncthreads();
-
-  for (unsigned int s = blockDim.x / 2; s > 16; s >>= 1) {
-    if (tid < s) {
-      sum_data[tid] += sum_data[tid + s];
-    }
-    __syncthreads();
-  }
-
-  float sum_value;
-  if (tid < 32) {
-    sum_value = sum_data[tid];
-    sum_value = math::warpReduceSum<float>(sum_value, 0xffffffff);
-    // sum_value = sum_data[0];
-  }
+  float sum_value = __expf(static_cast<float>(src[i]) - max_value);
+  sum_value = math::blockReduceSum<float>(sum_value, 0xffffffff);
 
   dst[i] = static_cast<T>(__expf(static_cast<float>(src[i]) - max_value) /
                           (sum_value + 1e-6f));
@@ -178,31 +144,38 @@ class SoftmaxCUDNNKernel : public framework::OpKernel<T> {
     const int N = SizeToAxis(axis, dims);
     const int D = SizeOutAxis(axis, dims);
 
-    constexpr int warps_per_block = 4;
-    if (D == 1 && dim == 128 && N % warps_per_block == 0 && sizeof(T) <= 4) {
-      // a warp for a batch, 4 elements for a thread, only support the softmax
-      // dim size = 128 currently
-      if (sizeof(T) == 2) {
-        VecSoftmaxForward<
-            T, int2, 4,
-            warps_per_block><<<N / warps_per_block, warps_per_block * WARP_SIZE,
-                               0, ctx.cuda_device_context().stream()>>>(
-            out_data, x->data<T>(), N, dim);
-      } else if (sizeof(T) == 4) {
-        //  VecSoftmaxForward<
-        //      T, int4, 4,
-        //      warps_per_block><<<N / warps_per_block, warps_per_block *
-        //      WARP_SIZE,
-        //                         0, ctx.cuda_device_context().stream()>>>(
-        //      out_data, x->data<T>(), N, dim);
-        SoftmaxForward<T, 4><<<N, 128, 128 * sizeof(float),
-                               ctx.cuda_device_context().stream()>>>(
-            out_data, x->data<T>(), N, dim);
-      } else {
-        assert(false && "not support");
-      }
+    auto& dev_ctx = ctx.template device_context<platform::CUDADeviceContext>();
+    int max_grid_threads = dev_ctx.GetMaxThreadsPerBlock();
+    bool optimize = false;
 
-    } else {
+    constexpr int warps_per_block = 4;
+    if (D == 1 && dim <= max_grid_threads && sizeof(T) <= 4) {
+      if (dim == 128 && N % warps_per_block == 0) {
+        optimize = true;
+        // a warp for a batch, 4 elements for a thread, only support the softmax
+        // dim size = 128 currently
+        if (sizeof(T) == 2) {
+          VecSoftmaxForward<T, int2, 4, warps_per_block><<<
+              N / warps_per_block, warps_per_block * WARP_SIZE, 0,
+              ctx.cuda_device_context().stream()>>>(out_data, x->data<T>(), N,
+                                                    dim);
+        } else if (sizeof(T) == 4) {
+          VecSoftmaxForward<T, int4, 4, warps_per_block><<<
+              N / warps_per_block, warps_per_block * WARP_SIZE, 0,
+              ctx.cuda_device_context().stream()>>>(out_data, x->data<T>(), N,
+                                                    dim);
+        } else {
+          assert(false && "not support");
+        }
+      } else if (dim >= 32 && dim <= 512) {
+        optimize = true;
+        int block = max(32, dim % 2 == 0 ? dim : (dim + 1));
+        WarpSoftmaxForward<T><<<N, block, block * sizeof(float),
+                                ctx.cuda_device_context().stream()>>>(
+            out_data, x->data<T>());
+      }
+    }
+    if (!optimize) {
       ScopedTensorDescriptor desc;
       std::vector<int> tensor_dims = {N, dim, D, 1};
       DataLayout layout = DataLayout::kNCHW;
