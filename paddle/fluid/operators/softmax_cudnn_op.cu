@@ -12,10 +12,13 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. */
 
+#include <algorithm>
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/operators/math/math_cuda_utils.h"
 #include "paddle/fluid/operators/softmax_op.h"
+#include "paddle/fluid/platform/cuda_device_function.h"
 #include "paddle/fluid/platform/cudnn_helper.h"
+#include "paddle/fluid/platform/float16.h"
 
 namespace paddle {
 namespace platform {
@@ -37,6 +40,31 @@ static inline int SizeOutAxis(const int axis, DDim dims) {
     size *= dims[i];
   }
   return size;
+}
+
+template <typename T, int WARP_BATCH, int WARP_SIZE>
+__forceinline__ __device__ void warp_reduce_sum(T* sum) {
+#pragma unroll
+  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+#pragma unroll
+    for (int i = 0; i < WARP_BATCH; ++i) {
+      T val += platform::CudaShuffleXorSync(0xffffffff, sum[i], offset);
+      sum[i] = sum[i] + val;
+    }
+  }
+}
+
+template <typename T, int WARP_BATCH, int WARP_SIZE>
+__forceinline__ __device__ void warp_reduce_max(T* sum) {
+#pragma unroll
+  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+#pragma unroll
+    for (int i = 0; i < WARP_BATCH; ++i) {
+      T val = std::max(
+          val, platform::CudaShuffleXorSync(0xffffffff, sum[i], offset));
+      sum[i] = std::max(sum[i], val);
+    }
+  }
 }
 
 template <typename T, int VLEN>
@@ -98,6 +126,95 @@ __global__ void WarpSoftmaxForward(T* dst, const T* src) {
                           (sum_value + 1e-6f));
 }
 
+template <typename T, int log2_elements, int max_grid_threads>
+__global__ void softmax_warp_forward(T* dst, const T* src, const int batch_size,
+                                     const int stride,
+                                     const int element_count) {
+  // WARP_SIZE and WARP_BATCH must match the return values batches_per_warp and
+  // warp_size of method warp_softmax_forward_kernel.
+  constexpr int next_power_of_two = 1 << log2_elements;
+  constexpr int WARP_SIZE = (next_power_of_two < max_grid_threads)
+                                ? next_power_of_two
+                                : max_grid_threads;
+  constexpr int WARP_ITERATIONS = next_power_of_two / WARP_SIZE;
+  constexpr int WARP_BATCH = (next_power_of_two <= 128) ? 2 : 1;
+
+  int first_batch = (blockDim.y * blockIdx.x + threadIdx.y) * WARP_BATCH;
+
+  // batch_size might not be a multiple of WARP_BATCH. Check how
+  // many batches have to computed within this WARP.
+  int local_batches = batch_size - first_batch;
+  if (local_batches > WARP_BATCH) local_batches = WARP_BATCH;
+
+  // there might be multiple batches per warp. compute the index within the
+  // batch
+  int local_idx = threadIdx.x;
+
+  src += first_batch * stride + local_idx;
+  dst += first_batch * stride + local_idx;
+
+  // The nested loops over WARP_BATCH and then WARP_ITERATIONS can be simplified
+  // to one loop,
+  // but I think doing so would obfuscate the logic of the algorithm, thus I
+  // chose to keep
+  // the nested loops.
+  // This should have no impact on performance because the loops are unrolled
+  // anyway.
+
+  // load data from global memory
+  T elements[WARP_BATCH][WARP_ITERATIONS];
+  for (int i = 0; i < WARP_BATCH; ++i) {
+    int batch_element_count = (i >= local_batches) ? 0 : element_count;
+    for (int it = 0; it < WARP_ITERATIONS; ++it) {
+      int element_index = local_idx + it * WARP_SIZE;
+      if (element_index < batch_element_count) {
+        elements[i][it] = src[i * element_count + it * WARP_SIZE];
+      } else {
+        elements[i][it] = -std::numeric_limits<T>::infinity();
+      }
+    }
+  }
+
+  // compute max_value
+  T max_value[WARP_BATCH];
+#pragma unroll
+  for (int i = 0; i < WARP_BATCH; ++i) {
+    max_value[i] = elements[i][0];
+#pragma unroll
+    for (int it = 1; it < WARP_ITERATIONS; ++it) {
+      max_value[i] =
+          (max_value[i] > elements[i][it]) ? max_value[i] : elements[i][it];
+    }
+  }
+  warp_reduce_max<T, WARP_BATCH, WARP_SIZE>(max_value);
+
+  T sum[WARP_BATCH]{static_cast<T>(0.0f)};
+#pragma unroll
+  for (int i = 0; i < WARP_BATCH; ++i) {
+#pragma unroll
+    for (int it = 0; it < WARP_ITERATIONS; ++it) {
+      elements[i][it] = std::exp(elements[i][it] - max_value[i]);
+      sum[i] += elements[i][it];
+    }
+  }
+  warp_reduce_sum<T, WARP_BATCH, WARP_SIZE>(sum);
+
+// store result
+#pragma unroll
+  for (int i = 0; i < WARP_BATCH; ++i) {
+    if (i >= local_batches) break;
+#pragma unroll
+    for (int it = 0; it < WARP_ITERATIONS; ++it) {
+      int element_index = local_idx + it * WARP_SIZE;
+      if (element_index < element_count) {
+        dst[i * element_count + it * WARP_SIZE] = elements[i][it] / sum[i];
+      } else {
+        break;
+      }
+    }
+  }
+}
+
 template <typename T, int VPT, int WARP_PER_BLOCK>
 __global__ void VecSoftmaxBackward(T* dst, const T* grad, const T* src,
                                    const int batch_size,
@@ -145,7 +262,7 @@ class SoftmaxCUDNNKernel : public framework::OpKernel<T> {
     const int D = SizeOutAxis(axis, dims);
 
     auto& dev_ctx = ctx.template device_context<platform::CUDADeviceContext>();
-    int max_grid_threads = dev_ctx.GetMaxThreadsPerBlock();
+    constexpr int max_grid_threads = 1024;
     bool optimize = false;
 
     constexpr int warps_per_block = 4;
@@ -169,10 +286,51 @@ class SoftmaxCUDNNKernel : public framework::OpKernel<T> {
         }
       } else if (dim >= 32 && dim <= 512) {
         optimize = true;
-        int block = max(32, dim % 2 == 0 ? dim : (dim + 1));
-        WarpSoftmaxForward<T><<<N, block, block * sizeof(float),
-                                ctx.cuda_device_context().stream()>>>(
+        int block = dim % 2 == 0 ? dim : (dim + 1);
+        WarpSoftmaxForward<
+            T><<<N, block, 0, ctx.cuda_device_context().stream()>>>(
             out_data, x->data<T>());
+      } else if (dim < 32 && dim > 512) {
+        int log2_elements = static_cast<int>(std::log2(dim));
+        const int next_power_of_two = 1 << log2_elements;
+
+        // This value must match the WARP_SIZE constexpr value computed inside
+        // softmax_warp_forward.
+        int warp_size = (next_power_of_two < max_grid_threads)
+                            ? next_power_of_two
+                            : max_grid_threads;
+
+        // This value must match the WARP_BATCH constexpr value computed inside
+        // softmax_warp_forward.
+        int batches_per_warp = (next_power_of_two <= 128) ? 2 : 1;
+
+        // use 128 threads per block to maximimize gpu utilization
+        constexpr int threads_per_block = 128;
+
+        int warps_per_block = (threads_per_block / warp_size);
+        int batches_per_block = warps_per_block * batches_per_warp;
+        int blocks = (N + batches_per_block - 1) / batches_per_block;
+        dim3 threads(warp_size, warps_per_block, 1);
+
+        // Launch code would be more elegant if C++ supported FOR CONSTEXPR
+        switch (log2_elements) {
+#define LAUNCH_SOFTMAX_WARP_FORWARD(L2E)                           \
+  case L2E:                                                        \
+    softmax_warp_forward<T, L2E, max_grid_threads><<<              \
+        blocks, threads, 0, ctx.cuda_device_context().stream()>>>( \
+        out_data, x->data<T>(), N, dim, dim);                      \
+    break;
+
+          LAUNCH_SOFTMAX_WARP_FORWARD(0);  // 1
+          LAUNCH_SOFTMAX_WARP_FORWARD(1);  // 2
+          LAUNCH_SOFTMAX_WARP_FORWARD(2);  // 4
+          LAUNCH_SOFTMAX_WARP_FORWARD(3);  // 8
+          LAUNCH_SOFTMAX_WARP_FORWARD(4);  // 16
+          LAUNCH_SOFTMAX_WARP_FORWARD(5);  // 32
+          LAUNCH_SOFTMAX_WARP_FORWARD(6);  // 64
+          default:
+            break;
+        }
       }
     }
     if (!optimize) {
