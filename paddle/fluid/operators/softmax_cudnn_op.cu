@@ -51,7 +51,8 @@ __device__ __forceinline__ void warp_reduce_sum(T* sum) {
   for (int offset = WARP_SIZE_SOFTMAX / 2; offset > 0; offset /= 2) {
 #pragma unroll
     for (int i = 0; i < WARP_BATCH; ++i) {
-      T sum_val = platform::CudaShuffleXorSync(0xFFFFFFFF, sum[i], offset);
+      T sum_val = platform::CudaShuffleXorSyncOff(0xFFFFFFFF, sum[i], offset,
+                                                  WARP_SIZE_SOFTMAX);
       sum[i] = sum[i] + sum_val;
     }
   }
@@ -63,7 +64,8 @@ __device__ __forceinline__ void warp_reduce_max(T* sum) {
   for (int offset = WARP_SIZE_SOFTMAX / 2; offset > 0; offset /= 2) {
 #pragma unroll
     for (int i = 0; i < WARP_BATCH; ++i) {
-      T max_val = platform::CudaShuffleXorSync(0xFFFFFFFF, sum[i], offset);
+      T max_val = platform::CudaShuffleXorSyncOff(0xFFFFFFFF, sum[i], offset,
+                                                  WARP_SIZE_SOFTMAX);
       sum[i] = static_cast<T>(
           max(static_cast<float>(sum[i]), static_cast<float>(max_val)));
     }
@@ -130,7 +132,7 @@ __global__ void WarpSoftmaxForward(T* dst, const T* src) {
 }
 
 #ifdef __NVCC__
-template <typename T, int log2_elements, int max_grid_threads>
+template <typename T, int log2_elements>
 __global__ void softmax_warp_forward(T* dst, const T* src, const int batch_size,
                                      const int stride,
                                      const int element_count) {
@@ -238,6 +240,78 @@ __global__ void VecSoftmaxBackward(T* dst, const T* grad, const T* src,
   reinterpret_cast<decltype(local_dst.s)*>(&dst[offset])[0] = local_dst.s;
 }
 
+template <typename T, int log2_elements>
+__global__ void softmax_warp_backward(T* gradInput, const T* grad,
+                                      const T* output, const int batch_size,
+                                      const int stride,
+                                      const int element_count) {
+  // WARP_SIZE and WARP_BATCH must match the return values batches_per_warp
+  // and warp_size of method warp_softmax_backward_kernel.
+  constexpr int next_power_of_two = 1 << log2_elements;
+  constexpr int WARP_SIZE_SOFTMAX =
+      (next_power_of_two < 32) ? next_power_of_two : 32;
+  constexpr int WARP_ITERATIONS_SOFTMAX = next_power_of_two / WARP_SIZE_SOFTMAX;
+  constexpr int WARP_BATCH_SOFTMAX = (next_power_of_two <= 128) ? 2 : 1;
+
+  int first_batch =
+      (blockDim.y * blockIdx.x + threadIdx.y) * WARP_BATCH_SOFTMAX;
+
+  // batch_size might not be a multiple of WARP_BATCH. Check how
+  // many batches have to computed within this WARP.
+  int local_batches = batch_size - first_batch;
+  if (local_batches > WARP_BATCH_SOFTMAX) local_batches = WARP_BATCH_SOFTMAX;
+
+  int local_idx = threadIdx.x % WARP_SIZE_SOFTMAX;
+
+  int thread_offset = first_batch * stride + local_idx;
+  grad += thread_offset;
+  output += thread_offset;
+  gradInput += thread_offset;
+
+  // load data from global memory
+  T grad_reg[WARP_BATCH_SOFTMAX][WARP_ITERATIONS_SOFTMAX];
+  T output_reg[WARP_BATCH_SOFTMAX][WARP_ITERATIONS_SOFTMAX];
+  for (int i = 0; i < WARP_BATCH_SOFTMAX; ++i) {
+    int batch_element_count = (i >= local_batches) ? 0 : element_count;
+    for (int it = 0; it < WARP_ITERATIONS_SOFTMAX; ++it) {
+      int element_index = local_idx + it * WARP_SIZE_SOFTMAX;
+      if (element_index < batch_element_count) {
+        grad_reg[i][it] = grad[i * element_count + it * WARP_SIZE_SOFTMAX];
+        output_reg[i][it] = output[i * element_count + it * WARP_SIZE_SOFTMAX];
+      } else {
+        grad_reg[i][it] = T(0);
+        output_reg[i][it] = T(0);
+      }
+    }
+  }
+
+  T sum[WARP_BATCH_SOFTMAX];
+#pragma unroll
+  for (int i = 0; i < WARP_BATCH_SOFTMAX; ++i) {
+    sum[i] = grad_reg[i][0];
+#pragma unroll
+    for (int it = 1; it < WARP_ITERATIONS_SOFTMAX; ++it) {
+      sum[i] += grad_reg[i][it];
+    }
+  }
+  warp_reduce_sum<T, WARP_BATCH_SOFTMAX, WARP_SIZE_SOFTMAX>(sum);
+
+// store result
+#pragma unroll
+  for (int i = 0; i < WARP_BATCH_SOFTMAX; ++i) {
+    if (i >= local_batches) break;
+#pragma unroll
+    for (int it = 0; it < WARP_ITERATIONS_SOFTMAX; ++it) {
+      int element_index = local_idx + it * WARP_SIZE_SOFTMAX;
+      if (element_index < element_count) {
+        // compute gradients
+        gradInput[i * element_count + it * WARP_SIZE_SOFTMAX] =
+            (grad_reg[i][it] - output_reg[i][it] * sum[i]);
+      }
+    }
+  }
+}
+
 template <typename T>
 class SoftmaxCUDNNKernel : public framework::OpKernel<T> {
  public:
@@ -283,7 +357,7 @@ class SoftmaxCUDNNKernel : public framework::OpKernel<T> {
         WarpSoftmaxForward<
             T><<<N, block, 0, ctx.cuda_device_context().stream()>>>(
             out_data, x->data<T>());
-      } else if (dim < 32 || dim > 512) {
+      } else if (dim < 32) {
         optimize = true;
         int log2_elements = static_cast<int>(std::log2(dim));
         const int next_power_of_two = 1 << log2_elements;
@@ -304,23 +378,20 @@ class SoftmaxCUDNNKernel : public framework::OpKernel<T> {
         int blocks = (N + batches_per_block - 1) / batches_per_block;
         dim3 threads(warp_size, warps_per_block, 1);
 
-        // Launch code would be more elegant if C++ supported FOR CONSTEXPR
         switch (log2_elements) {
-#define LAUNCH_SOFTMAX_WARP_FORWARD(L2E)                           \
-  case L2E:                                                        \
-    softmax_warp_forward<T, L2E, max_grid_threads><<<              \
-        blocks, threads, 0, ctx.cuda_device_context().stream()>>>( \
-        out_data, x->data<T>(), N, dim, dim);                      \
+#define LAUNCH_SOFTMAX_WARP_FORWARD(L2E)                                     \
+  case L2E:                                                                  \
+    softmax_warp_forward<                                                    \
+        T, L2E><<<blocks, threads, 0, ctx.cuda_device_context().stream()>>>( \
+        out_data, x->data<T>(), N, dim, dim);                                \
     break;
 
-          LAUNCH_SOFTMAX_WARP_FORWARD(0);   // 1
-          LAUNCH_SOFTMAX_WARP_FORWARD(1);   // 2
-          LAUNCH_SOFTMAX_WARP_FORWARD(2);   // 4
-          LAUNCH_SOFTMAX_WARP_FORWARD(3);   // 8
-          LAUNCH_SOFTMAX_WARP_FORWARD(4);   // 16
-          LAUNCH_SOFTMAX_WARP_FORWARD(5);   // 32
-          LAUNCH_SOFTMAX_WARP_FORWARD(9);   // 512
-          LAUNCH_SOFTMAX_WARP_FORWARD(10);  // 1024
+          LAUNCH_SOFTMAX_WARP_FORWARD(0);  // 1
+          LAUNCH_SOFTMAX_WARP_FORWARD(1);  // 2
+          LAUNCH_SOFTMAX_WARP_FORWARD(2);  // 4
+          LAUNCH_SOFTMAX_WARP_FORWARD(3);  // 8
+          LAUNCH_SOFTMAX_WARP_FORWARD(4);  // 16
+          LAUNCH_SOFTMAX_WARP_FORWARD(5);  // 32
           default:
             break;
         }
@@ -367,26 +438,72 @@ class SoftmaxGradCUDNNKernel : public framework::OpKernel<T> {
     constexpr bool warp_softmax_available =
         std::is_same<T, float>::value ||
         std::is_same<T, platform::float16>::value;
-    if (D == 1 && dim == 128 && N % warps_per_block == 0 &&
-        warp_softmax_available) {
-      if (std::is_same<T, float>::value) {
-        VecSoftmaxBackward<
-            float, 4,
-            warps_per_block><<<N / warps_per_block, warps_per_block * WARP_SIZE,
-                               0, ctx.cuda_device_context().stream()>>>(
-            dx->data<float>(), dout->data<float>(), out->data<float>(), N, dim);
-      } else if (std::is_same<T, platform::float16>::value) {
-        VecSoftmaxBackward<
-            platform::float16, 4,
-            warps_per_block><<<N / warps_per_block, warps_per_block * WARP_SIZE,
-                               0, ctx.cuda_device_context().stream()>>>(
-            dx->data<platform::float16>(), dout->data<platform::float16>(),
-            out->data<platform::float16>(), N, dim);
-      } else {
-        PADDLE_ENFORCE_EQ(
-            warp_softmax_available, true,
-            platform::errors::Unimplemented(
-                "Warp softmax backward is only available for fp32 and fp16"));
+    auto& dev_ctx = ctx.template device_context<platform::CUDADeviceContext>();
+    constexpr int max_grid_threads = 1024;
+    bool optimize = false;
+
+    if (D == 1 && dim <= max_grid_threads && warp_softmax_available) {
+      if (dim == 128 && N % warps_per_block == 0) {
+        optimize = true;
+        if (std::is_same<T, float>::value) {
+          VecSoftmaxBackward<float, 4, warps_per_block><<<
+              N / warps_per_block, warps_per_block * WARP_SIZE, 0,
+              ctx.cuda_device_context().stream()>>>(dx->data<float>(),
+                                                    dout->data<float>(),
+                                                    out->data<float>(), N, dim);
+        } else if (std::is_same<T, platform::float16>::value) {
+          VecSoftmaxBackward<platform::float16, 4, warps_per_block><<<
+              N / warps_per_block, warps_per_block * WARP_SIZE, 0,
+              ctx.cuda_device_context().stream()>>>(
+              dx->data<platform::float16>(), dout->data<platform::float16>(),
+              out->data<platform::float16>(), N, dim);
+        } else {
+          PADDLE_ENFORCE_EQ(
+              warp_softmax_available, true,
+              platform::errors::Unimplemented(
+                  "Warp softmax backward is only available for fp32 and fp16"));
+        }
+      } else if (dim <= 512) {
+        optimize = true;
+        int log2_elements = static_cast<int>(std::log2(dim));
+        const int next_power_of_two = 1 << log2_elements;
+
+        // This value must match the WARP_SIZE constexpr value computed inside
+        // softmax_warp_backward.
+        int warp_size = (next_power_of_two < 32) ? next_power_of_two : 32;
+
+        // This value must match the WARP_BATCH constexpr value computed inside
+        // softmax_warp_backward.
+        int batches_per_warp = (next_power_of_two <= 128) ? 2 : 1;
+
+        // use 128 threads per block to maximimize gpu utilization
+        constexpr int threads_per_block = 128;
+
+        int warps_per_block = (threads_per_block / warp_size);
+        int batches_per_block = warps_per_block * batches_per_warp;
+        int blocks = (N + batches_per_block - 1) / batches_per_block;
+        dim3 threads(warp_size, warps_per_block, 1);
+        switch (log2_elements) {
+#define LAUNCH_SOFTMAX_WARP_BACKWARD(L2E)                                    \
+  case L2E:                                                                  \
+    softmax_warp_backward<                                                   \
+        T, L2E><<<blocks, threads, 0, ctx.cuda_device_context().stream()>>>( \
+        dx->data<T>(), dout->data<T>(), out->data<T>(), N, dim, dim);        \
+    break;
+
+          LAUNCH_SOFTMAX_WARP_BACKWARD(0);  // 1
+          LAUNCH_SOFTMAX_WARP_BACKWARD(1);  // 2
+          LAUNCH_SOFTMAX_WARP_BACKWARD(2);  // 4
+          LAUNCH_SOFTMAX_WARP_BACKWARD(3);  // 8
+          LAUNCH_SOFTMAX_WARP_BACKWARD(4);  // 16
+          LAUNCH_SOFTMAX_WARP_BACKWARD(5);  // 32
+          LAUNCH_SOFTMAX_WARP_BACKWARD(6);  // 64
+          LAUNCH_SOFTMAX_WARP_BACKWARD(7);  // 128
+          LAUNCH_SOFTMAX_WARP_BACKWARD(8);  // 256
+          LAUNCH_SOFTMAX_WARP_BACKWARD(9);  // 512
+          default:
+            break;
+        }
       }
     } else {
       ScopedTensorDescriptor desc;

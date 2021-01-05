@@ -84,6 +84,16 @@ __forceinline__ __device__ T CudaShuffleXorSync(unsigned mask, T val,
 #endif
 }
 
+template <typename T>
+__forceinline__ __device__ T CudaShuffleXorSyncOff(unsigned mask, T val,
+                                                   int laneMask,
+                                                   int width = warpSize) {
+#if CUDA_VERSION < 9000
+  return __shfl_xor(val, laneMask, width);
+#else
+  return __shfl_xor_sync(mask, val, laneMask, width);
+#endif
+}
 // CUDA 9.0 have native compatible float16 shfl_down
 #if CUDA_VERSION < 9000
 template <>
@@ -97,6 +107,11 @@ template <>
 __forceinline__ __device__ float16 CudaShuffleXorSync(unsigned mask,
                                                       float16 val, int width) {
   return float16(__shfl_xor(static_cast<half>(val), width));
+}
+template <>
+__forceinline__ __device__ float16
+CudaShuffleXorSyncOff(unsigned mask, float16 val, int laneMask, int width) {
+  return float16(__shfl_xor(static_cast<half>(val), laneMask, width));
 }
 #else
 template <>
@@ -133,6 +148,12 @@ template <>
 __forceinline__ __device__ float16 CudaShuffleXorSync(unsigned mask,
                                                       float16 val, int width) {
   return float16(__shfl_xor_sync(mask, static_cast<half>(val), width));
+}
+template <>
+__forceinline__ __device__ float16
+CudaShuffleXorSyncOff(unsigned mask, float16 val, int laneMask, int width) {
+  return float16(
+      __shfl_xor_sync(mask, static_cast<half>(val), laneMask, width));
 }
 
 template <>
