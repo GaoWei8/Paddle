@@ -15,9 +15,17 @@
 from __future__ import print_function
 
 from . import core
+from .data_feeder import convert_dtype
+from sys import version_info
+from paddle.fluid import framework
+from .framework import Variable
 from .wrapped_decorator import signature_safe_contextmanager
 import os
 import six
+import json
+import inspect
+import importlib
+import numpy as np
 
 __all__ = [
     'cuda_profiler', 'reset_profiler', 'profiler', 'start_profiler',
@@ -33,6 +41,216 @@ NVPROF_CONFIG = [
     "enableonstart 0",
     "conckerneltrace",
 ]
+
+not_record_op = [
+    'data', 'creat_tensor', 'creat_parameter', 'global_var', 'Optimizer'
+]
+not_record_param = ['name', 'op_type', 'attrs', 'bias_attr', 'param_attr']
+
+CONTROL_FLOW_OPS = [
+    "conditional_block", "switch", "static_rnn", "while", "while_loop", "cond",
+    "case", "ifelse", "dynamic_rnn", "switch_case"
+]
+
+op_alias = {
+    "resize_nearest": "nearest_interp",
+    "resize_bilinear": "bilinear_interp",
+    "sums": "sum",
+    "hsigmoid": "hierarchical_sigmoid",
+    "sampled_softmax_with_cross_entropy": "sample_logits",
+    "max_pool2d_with_index": "adaptive_pool2d",
+    "max_pool3d_with_index": "adaptive_pool3d",
+    "smooth_l1_loss": "smooth_l1",
+    "reshape2": "reshape",
+    "unsqueeze2": "unsqueeze",
+    "top_k": "topk",
+    "global_step_counter": "autoincreased_step_counter",
+    "cross_entropy2": "cross_entropy",
+    "depthwise_conv2d": "conv2d",
+    "arg_max": "argmax"
+}
+
+op_params_json_list = []
+
+
+class APIStr(object):
+    def __init__(self, layer_type, params):
+        param_j = self.op_trans(layer_type, params)
+        if param_j != None:
+            op_params_json_list.append(param_j)
+            info_json_file = os.environ.get('API_INFO_LOG_PATH')
+            if info_json_file is not None:
+                with open(info_json_file, 'a') as f:
+                    f.writelines(json.dumps(param_j, sort_keys=True, indent=4))
+                    f.writelines(',\n')
+
+    def import_fluid_module(self, api_name):
+        act_api_name = api_name
+        try:
+            if act_api_name in ["embedding", "ont_hot"]:
+                module_name = "paddle.fluid"
+            else:
+                module_name = "paddle.fluid.layers"
+            module = importlib.import_module(module_name)
+            print("Immport %s.%s." % (module, act_api_name))
+            return getattr(module, act_api_name)
+        except Exception:
+            print("Cannot immport %s.%s." % (module_name, act_api_name))
+            module = None
+
+    def import_paddle_static_module(self, api_name):
+        act_api_name = api_name
+        try:
+            module = importlib.import_module("paddle.static")
+            print("Immport %s.%s." % (module, act_api_name))
+            return getattr(module, act_api_name)
+        except Exception:
+            print("Cannot immport paddle.%s." % (act_api_name))
+            module = None
+
+    def import_paddle_module(self, api_name):
+        act_api_name = api_name
+        try:
+            module = importlib.import_module("paddle")
+            print("Immport %s.%s." % (module, act_api_name))
+            return getattr(module, act_api_name)
+        except Exception:
+            print("Cannot immport paddle.%s." % (act_api_name))
+            module = None
+
+    def is_variable(self, type):
+        if isinstance(
+                type,
+                Variable) or str(type).find('Variable') != -1 or isinstance(
+                    type,
+                    framework.Parameter) or str(type).find('Parameter') != -1:
+            return True
+
+    def op_trans(self, op, params):
+        op_json = {}
+        params_json = {}
+        if op in op_alias.keys():
+            op = op_alias[op]
+        valid_op = True
+        for not_op in not_record_op:
+            if op.find(not_op) != -1:
+                valid_op = False
+        if valid_op:
+            op_json["op"] = op
+            print(op)
+        else:
+            print("API_LOG: return as not valid op:", op)
+            return None
+
+        if len(params) == 0 or op in CONTROL_FLOW_OPS:
+            op_json["param_info"] = ''
+        else:
+            func = self.import_paddle_module(op)
+            argspec = None
+            if func is None:
+                func = self.import_fluid_module(op)
+
+            if func is not None:
+                argspec = inspect.getargspec(func)
+                #print(argspec)
+
+            for param in params:
+                key = param[0]
+                #print(key)
+                values = param[1]
+                #print(values)
+                if key != None and argspec != None and key in argspec.args and key not in not_record_param and not callable(
+                        values):
+                    data_type = ""
+                    dict_temp = {}
+                    if hasattr(values, 'dtype'):
+                        if self.is_variable(values.dtype):
+                            data_type = "Variable"
+                        else:
+                            data_type = convert_dtype(values.dtype)
+
+                    vtype = self.type_to_string(values, key, op_json["op"])
+                    if values is None:
+                        dict_temp = {'type': 'string', 'value': str(None)}
+                    elif vtype == "Variable":
+                        dict_temp = {
+                            'type': vtype,
+                            'dtype': data_type,
+                            'shape': str(list(values.shape))
+                        }
+                    elif vtype == "dict":
+                        dict_temp = None
+                    elif vtype == "list" and type(values[0]) is Variable:
+                        v = values[0]
+                        if hasattr(v, 'dtype'):
+                            data_type_l = convert_dtype(v.dtype)
+                        for i in range(len(values)):
+                            dict_temp[key + str(i)] = {
+                                'type': 'Variable',
+                                'dtype': data_type_l,
+                                'shape': str(list(values[i].shape))
+                            }
+                        dict_temp['type'] = 'list<Variable>'
+                    elif vtype == "VarType":
+                        dict_temp = {
+                            'type': 'string',
+                            'value': convert_dtype(values)
+                        }
+                    elif vtype == "unicode":
+                        dict_temp = {
+                            'type': 'string',
+                            'value': str(values.encode('utf-8'))
+                        }
+                    else:
+                        dict_temp = {'type': vtype, 'value': str(values)}
+                    if dict_temp != None:
+                        params_json[key] = dict_temp
+                op_json["param_info"] = params_json
+        return op_json
+
+    def type_to_string(self, values, key, op):
+        vtype = ""
+        if self.is_variable(type(values)):
+            vtype = "Variable"
+        elif type(values) is float:
+            vtype = "float"
+        elif type(values) is bool:
+            vtype = "bool"
+        elif type(values) is str:
+            vtype = "string"
+        elif type(values) is int:
+            vtype = "int"
+        elif version_info.major == 2 and type(values) is long:
+            vtype = "long"
+        elif type(values) is list:
+            vtype = "list"
+        elif type(values) is tuple:
+            vtype = "tuple"
+        elif type(values) is dict:
+            vtype = "dict"
+        elif type(values) is np.ndarray:
+            vtype = "numpy.ndarray"
+        elif str(type(values)).find('NoneType') != -1:
+            return vtype
+        elif str(type(values)).find('VarType') != -1:
+            vtype = 'VarType'
+        elif str(type(values)).find('unicode') != -1:
+            vtype = 'unicode'
+        else:
+            print("Unsupported vtype %s (key: %s, op: %s)" %
+                  (type(values), key, op))
+        return vtype
+
+
+def API_info_summary():
+    info_json_file = os.environ.get('API_INFO_LOG_PATH')
+    if info_json_file is not None:
+        with open(info_json_file, 'w') as f:
+            f.writelines(
+                json.dumps(
+                    op_params_json_list, sort_keys=True, indent=4))
+            f.writelines('\n')
+            print(json.dumps(op_params_json_list, sort_keys=True, indent=4))
 
 
 @signature_safe_contextmanager
@@ -193,6 +411,7 @@ def start_profiler(state, tracer_option='Default'):
 
     core.set_tracer_option(prof_tracer_option)
     core.enable_profiler(prof_state)
+    API_info_summary()
 
 
 def stop_profiler(sorted_key=None, profile_path='/tmp/profile'):
